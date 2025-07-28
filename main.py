@@ -220,68 +220,87 @@ def get_network_data(driver, episode_url):
         print(f"오류: 네트워크 요청 처리 중: {e}")
         return None, None, None
 
+def download_episode(driver, link, episode_num, anime_title, download_dir):
+    # 한 에피소드의 다운로드를 처리하는 함수
+    save_name = f"{anime_title} {episode_num}화"
+    expected_filepath = download_dir / f"{save_name}.mkv"
+    if expected_filepath.exists():
+        print(f"\n이미 파일이 존재하여 건너뜁니다: {expected_filepath.name}")
+        return True # 성공으로 처리
+
+    print(f"\n{'='*20} {episode_num}화 처리 시작 {'='*20}")
+    
+    driver.get('about:blank')
+    time.sleep(1)
+
+    mpd_url, lic_url, lic_headers = get_network_data(driver, link)
+
+    if not all([mpd_url, lic_url, lic_headers]):
+        print(f"오류: {episode_num}화 네트워크 정보 확보 실패")
+        return False # 실패로 처리
+    
+    try:
+        pssh = get_pssh_from_init(mpd_url, lic_headers)
+        if not pssh:
+            print(f"오류: {episode_num}화 PSSH 확보 실패")
+            return False
+        
+        keys = get_key_original(pssh, lic_url, lic_headers)
+        if not keys:
+            print(f"오류: {episode_num}화 키 추출 실패")
+            return False
+        
+        print(f"키 추출 성공: {' '.join(keys)}")
+
+        key_args = [item for sublist in [k.split() for k in keys] for item in sublist]
+        command = [
+            'N_m3u8DL-RE', mpd_url,
+            '--save-name', save_name,
+            '--save-dir', str(download_dir.resolve()),
+            '-M', 'format=mkv:muxer=mkvmerge',
+            '--select-video', 'best',
+            '--select-audio', 'best',
+            '--no-log'
+        ] + key_args
+        
+        print(f"다운로드 시작: {save_name}.mkv")
+        subprocess.run(command)
+        print(f"{save_name}.mkv 다운로드 완료")
+        return True # 성공으로 처리
+    except Exception as e:
+        print(f"오류: {episode_num}화 처리 중 예외 발생: {e}")
+        return False
+
 if __name__ == "__main__":
-    # 스크립트 실행
     driver = login_and_select_profile_wire()
     if driver:
         episode_links, anime_title = get_episode_links_and_title(driver, ANIME_ID)
         
-        # ▼▼▼ 수정된 부분 ▼▼▼
-        # 애니메이션 제목으로 하위 폴더 생성
         DOWNLOAD_DIR = Path("./downloads") / anime_title
         DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        # ▲▲▲ 수정된 부분 ▲▲▲
 
         if episode_links and anime_title:
+            failed_episodes = [] # 실패한 에피소드를 기록할 리스트
+
+            # 1차 시도
             for i, link in enumerate(episode_links):
-                episode_num = i + 1
-                
-                save_name = f"{anime_title} {episode_num}화"
-                expected_filepath = DOWNLOAD_DIR / f"{save_name}.mkv"
-                if expected_filepath.exists():
-                    print(f"\n이미 파일이 존재하여 건너뜁니다: {expected_filepath.name}")
-                    continue
-
-                print(f"\n{'='*20} {episode_num} / {len(episode_links)} 번째 에피소드 처리 시작 {'='*20}")
-                
-                driver.get('about:blank')
-                time.sleep(1)
-
-                mpd_url, lic_url, lic_headers = get_network_data(driver, link)
-
-                if not all([mpd_url, lic_url, lic_headers]):
-                    print(f"오류: {episode_num}화 네트워크 정보 확보 실패, 건너뜀")
-                    continue
-                
-                try:
-                    pssh = get_pssh_from_init(mpd_url, lic_headers)
-                    if not pssh:
-                        print(f"오류: {episode_num}화 PSSH 확보 실패")
-                        continue
-                    
-                    keys = get_key_original(pssh, lic_url, lic_headers)
-                    if not keys:
-                        print(f"오류: {episode_num}화 키 추출 실패")
-                        continue
-                    
-                    print(f"키 추출 성공: {' '.join(keys)}")
-
-                    key_args = [item for sublist in [k.split() for k in keys] for item in sublist]
-                    command = [
-                        'N_m3u8DL-RE', mpd_url,
-                        '--save-name', save_name,
-                        '--save-dir', str(DOWNLOAD_DIR.resolve()), # 수정된 폴더 경로 사용
-                        '-M', 'format=mkv:muxer=mkvmerge',
-                        '--select-video', 'best',
-                        '--select-audio', 'best',
-                        '--no-log'
-                    ] + key_args
-                    
-                    print(f"다운로드 시작: {save_name}.mkv")
-                    subprocess.run(command)
-                    print(f"{save_name}.mkv 다운로드 완료")
-                except Exception as e:
-                    print(f"오류: {episode_num}화 처리 중 예외 발생: {e}")
+                success = download_episode(driver, link, i + 1, anime_title, DOWNLOAD_DIR)
+                if not success:
+                    failed_episodes.append({'link': link, 'num': i + 1})
+            
+            # 재시도
+            if failed_episodes:
+                print(f"\n{'='*20} 실패한 {len(failed_episodes)}개 항목 재시도 시작 {'='*20}")
+                # 재시도 전에는 항상 브라우저를 재시작하여 세션을 초기화
+                driver.quit()
+                driver = login_and_select_profile_wire()
+                if driver:
+                    for episode in failed_episodes:
+                        download_episode(driver, episode['link'], episode['num'], anime_title, DOWNLOAD_DIR)
 
         print("\n모든 작업 완료. 브라우저를 종료합니다")
-        driver.quit()
+        if 'driver' in locals() and driver:
+            try:
+                driver.quit()
+            except:
+                pass
