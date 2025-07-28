@@ -17,8 +17,24 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+ASCII_ART = """
+██████╗ ██╗   ██╗    
+██╔══██╗╚██╗ ██╔╝    
+██████╔╝ ╚████╔╝     
+██╔══██╗  ╚██╔╝      
+██████╔╝   ██║       
+╚═════╝    ╚═╝      
+
+██╗  ██╗ █████╗ ███╗   ██╗██████╗ ██╗                            
+██║  ██║██╔══██╗████╗  ██║██╔══██╗██║                            
+███████║███████║██╔██╗ ██║██████╔╝██║                            
+██╔══██║██╔══██║██║╚██╗██║██╔══██╗██║                            
+██║  ██║██║  ██║██║ ╚████║██████╔╝██║                            
+╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═════╝ ╚═╝ 
+"""
+
 # --- 사용자 설정 ---
-ANIME_ID = 16075
+ANIME_ID = 40846
 # -------------------
 
 # 전역 변수 설정
@@ -201,10 +217,10 @@ def get_network_data(driver, episode_url):
     driver.get(episode_url)
     try:
         print("MPD 요청 대기 중...")
-        driver.wait_for_request(r'\.mpd', timeout=30)
+        driver.wait_for_request(r'\.mpd', timeout=15)
         print("MPD 요청 감지")
         print("라이선스 요청 대기 중...")
-        driver.wait_for_request(r'license\.pallycon\.com/ri/licenseManager\.do', timeout=30)
+        driver.wait_for_request(r'license\.pallycon\.com/ri/licenseManager\.do', timeout=15)
         print("라이선스 요청 감지")
         
         mpd_url, lic_url, lic_headers = None, None, None
@@ -221,12 +237,12 @@ def get_network_data(driver, episode_url):
         return None, None, None
 
 def download_episode(driver, link, episode_num, anime_title, download_dir):
-    # 한 에피소드의 다운로드를 처리하는 함수
+    # 한 에피소드의 다운로드를 처리
     save_name = f"{anime_title} {episode_num}화"
     expected_filepath = download_dir / f"{save_name}.mkv"
     if expected_filepath.exists():
         print(f"\n이미 파일이 존재하여 건너뜁니다: {expected_filepath.name}")
-        return True # 성공으로 처리
+        return True, 0 # 성공, 0바이트 다운로드
 
     print(f"\n{'='*20} {episode_num}화 처리 시작 {'='*20}")
     
@@ -237,18 +253,18 @@ def download_episode(driver, link, episode_num, anime_title, download_dir):
 
     if not all([mpd_url, lic_url, lic_headers]):
         print(f"오류: {episode_num}화 네트워크 정보 확보 실패")
-        return False # 실패로 처리
+        return False, 0 # 실패
     
     try:
         pssh = get_pssh_from_init(mpd_url, lic_headers)
         if not pssh:
             print(f"오류: {episode_num}화 PSSH 확보 실패")
-            return False
+            return False, 0
         
         keys = get_key_original(pssh, lic_url, lic_headers)
         if not keys:
             print(f"오류: {episode_num}화 키 추출 실패")
-            return False
+            return False, 0
         
         print(f"키 추출 성공: {' '.join(keys)}")
 
@@ -266,39 +282,73 @@ def download_episode(driver, link, episode_num, anime_title, download_dir):
         print(f"다운로드 시작: {save_name}.mkv")
         subprocess.run(command)
         print(f"{save_name}.mkv 다운로드 완료")
-        return True # 성공으로 처리
+        
+        # 다운로드된 파일 크기 확인
+        downloaded_size = expected_filepath.stat().st_size if expected_filepath.exists() else 0
+        return True, downloaded_size
     except Exception as e:
         print(f"오류: {episode_num}화 처리 중 예외 발생: {e}")
-        return False
+        return False, 0
 
 if __name__ == "__main__":
+    print(ASCII_ART)
+    
+    DOWNLOAD_DIR_BASE = Path("./downloads")
+    
     driver = login_and_select_profile_wire()
     if driver:
         episode_links, anime_title = get_episode_links_and_title(driver, ANIME_ID)
         
-        DOWNLOAD_DIR = Path("./downloads") / anime_title
+        DOWNLOAD_DIR = DOWNLOAD_DIR_BASE / anime_title
         DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
         if episode_links and anime_title:
-            failed_episodes = [] # 실패한 에피소드를 기록할 리스트
+            failed_episodes = []
+            total_downloaded_bytes = 0
 
             # 1차 시도
+            print(f"\n{'='*20} 1차 다운로드를 시작합니다 ({len(episode_links)}개) {'='*20}")
             for i, link in enumerate(episode_links):
-                success = download_episode(driver, link, i + 1, anime_title, DOWNLOAD_DIR)
-                if not success:
+                success, size = download_episode(driver, link, i + 1, anime_title, DOWNLOAD_DIR)
+                if success:
+                    total_downloaded_bytes += size
+                else:
+                    # 실패한 에피소드의 링크와 번호를 기록
                     failed_episodes.append({'link': link, 'num': i + 1})
             
-            # 재시도
-            if failed_episodes:
-                print(f"\n{'='*20} 실패한 {len(failed_episodes)}개 항목 재시도 시작 {'='*20}")
-                # 재시도 전에는 항상 브라우저를 재시작하여 세션을 초기화
+            # --- 수정된 재시도 로직 ---
+            # 1차 시도 후 실패한 에피소드가 있으면 재시도 시작
+            retry_pass = 0
+            max_retries = 5
+            while failed_episodes and retry_pass < max_retries:
+                retry_pass += 1
+                print(f"\n{'='*20} 실패한 {len(failed_episodes)}개 항목 재시도 ({retry_pass}/{max_retries}) {'='*20}")
+                
+                # 재시도 시에는 항상 브라우저를 재시작하여 세션 초기화
                 driver.quit()
                 driver = login_and_select_profile_wire()
-                if driver:
-                    for episode in failed_episodes:
-                        download_episode(driver, episode['link'], episode['num'], anime_title, DOWNLOAD_DIR)
+                if not driver:
+                    print("오류: 재로그인 실패. 재시도를 중단합니다.")
+                    break
+
+                # 이번 재시도 회차에서 또 실패한 항목을 기록할 리스트
+                failures_this_pass = []
+                for episode in failed_episodes:
+                    success, size = download_episode(driver, episode['link'], episode['num'], anime_title, DOWNLOAD_DIR)
+                    if success:
+                        total_downloaded_bytes += size
+                    else:
+                        failures_this_pass.append(episode)
+                
+                # 실패 목록을 이번 회차에 실패한 것들로 갱신
+                failed_episodes = failures_this_pass
+            # --- 재시도 로직 끝 ---
 
         print("\n모든 작업 완료. 브라우저를 종료합니다")
+        
+        total_gb = total_downloaded_bytes / (1024 ** 3)
+        print(f"총 다운로드 용량: {total_gb:.2f} GB")
+
         if 'driver' in locals() and driver:
             try:
                 driver.quit()
