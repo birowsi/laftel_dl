@@ -1,0 +1,8 @@
+python-dotenv
+httpx
+pywidevine
+selenium-wire
+webdriver-manager
+yt-dlp
+blinker==1.7.0
+setuptools
