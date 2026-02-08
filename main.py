@@ -4,7 +4,6 @@ import subprocess
 import time
 import json
 from pathlib import Path
-from dotenv import load_dotenv
 import httpx
 import base64
 from pywidevine.cdm import Cdm
@@ -39,6 +38,50 @@ ANIME_ID = 40846
 
 # 전역 변수 설정
 WVD_PATH = "./license/device.wvd"
+BINARY_DIR = Path("./binaries").resolve()
+N_M3U8DL_RE_EXE = BINARY_DIR / "N_m3u8DL-RE.exe"
+MKVMERGE_EXE = BINARY_DIR / "mkvmerge.exe"
+FFMPEG_EXE = BINARY_DIR / "ffmpeg.exe"
+MP4DECRYPT_EXE = BINARY_DIR / "mp4decrypt.exe"
+
+def build_process_env():
+    env = os.environ.copy()
+    env["PATH"] = str(BINARY_DIR) + os.pathsep + env.get("PATH", "")
+    return env
+
+def check_external_tools():
+    required = ["yt-dlp", "N_m3u8DL-RE", "mkvmerge", "mp4decrypt"]
+    env = build_process_env()
+    print(f"외부 도구 점검 PATH 헤드: {env['PATH'].split(os.pathsep)[0]}")
+    missing = []
+    for tool in required:
+        result = subprocess.run(
+            ["where", tool],
+            capture_output=True,
+            text=True,
+            env=env,
+            shell=False,
+        )
+        if result.returncode != 0:
+            missing.append(tool)
+        else:
+            print(f"확인됨: {tool} -> {result.stdout.strip()}")
+    if missing:
+        print(f"오류: 외부 도구를 찾지 못했습니다: {', '.join(missing)}")
+        print(f"확인 경로: {BINARY_DIR}")
+        return False
+    if not N_M3U8DL_RE_EXE.exists():
+        print(f"오류: {N_M3U8DL_RE_EXE} 파일을 찾지 못했습니다.")
+        return False
+    if not MKVMERGE_EXE.exists():
+        print(f"오류: {MKVMERGE_EXE} 파일을 찾지 못했습니다.")
+        return False
+    if not MP4DECRYPT_EXE.exists():
+        print(f"오류: {MP4DECRYPT_EXE} 파일을 찾지 못했습니다.")
+        print("안내: Bento4에서 mp4decrypt.exe를 받아 ./binaries 폴더에 넣어주세요.")
+        print("안내: https://www.bento4.com/downloads/")
+        return False
+    return True
 
 def sanitize_filename(name):
     # 파일명으로 사용할 수 없는 특수문자 제거
@@ -78,7 +121,7 @@ def get_pssh_from_init(mpd_url, headers):
             '--allow-unplayable-formats', '-f', 'bestvideo[ext=mp4]',
             '-o', str(init_file.resolve()), mpd_url
         ] + header_args
-        subprocess.run(command, check=True, capture_output=True)
+        subprocess.run(command, check=True, capture_output=True, env=build_process_env())
         if not init_file.exists():
             print("  - 오류: init.m4f 파일 다운로드 실패")
             return None
@@ -133,38 +176,32 @@ def get_key_original(pssh, license_url, headers):
         return None
 
 def login_and_select_profile_wire():
-    # selenium-wire 드라이버로 로그인 및 프로필 선택
-    load_dotenv()
-    LAFTEL_EMAIL = os.getenv("LAFTEL_EMAIL")
-    LAFTEL_PASSWORD = os.getenv("LAFTEL_PASSWORD")
-    
+    # 크롬 사용자 프로필을 재사용하고, 로그인은 수동으로 진행
     options = { 'suppress_connection_errors': True }
     chrome_options = webdriver.ChromeOptions()
     prefs = {"profile.default_content_setting_values.notifications": 2}
     chrome_options.add_experimental_option("prefs", prefs)
     chrome_options.add_argument("--mute-audio")
+    profile_dir = (Path("./.chrome-profile")).resolve()
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    chrome_options.add_argument(f"--user-data-dir={profile_dir}")
+    chrome_options.add_argument("--profile-directory=Default")
     
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, seleniumwire_options=options, options=chrome_options)
     
-    wait = WebDriverWait(driver, 10)
     try:
         driver.get("https://laftel.net/auth/login")
-        start_email_selector = "#root > div.sc-4f246076-1.kxlezL > div > div > div.sc-755b8e85-5.jFLdwS > div > div.sc-c41aa92c-3.jElMpk > div > button"
-        wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, start_email_selector))).click()
-        email_input_selector = "#root > div.sc-4f246076-1.kxlezL > div > div > form > div > div.sc-e3dba43f-0.efOPnx > div.sc-e3dba43f-3.gcfHtI > input"
-        wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, email_input_selector))).send_keys(LAFTEL_EMAIL)
-        driver.find_element(By.CSS_SELECTOR, "#root > div.sc-4f246076-1.kxlezL > div > div > form > button").click()
-        password_input_selector = "#root > div.sc-4f246076-1.kxlezL > div > div > form > div > div.sc-7eaf7183-4.iyVQgC > div > div.sc-e3dba43f-3.gcfHtI > input"
-        wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, password_input_selector))).send_keys(LAFTEL_PASSWORD)
-        driver.find_element(By.CSS_SELECTOR, "#root > div.sc-4f246076-1.kxlezL > div > div > form > button").click()
-        profile_selector = "#root > div.sc-dfccfe31-0.bvOzPl > div > div.sc-f8159b5a-0.fZezog > div:nth-child(1) > div:nth-child(1)"
-        wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, profile_selector))).click()
-        wait.until(EC.url_to_be("https://laftel.net/"))
-        print("로그인 및 프로필 선택 완료")
+        print("브라우저에서 라프텔 로그인/프로필 선택을 직접 완료해 주세요.")
+        input("완료 후 Enter를 누르세요: ")
+        print("수동 로그인 단계 완료")
         return driver
     except Exception as e:
-        print(f"오류: 로그인/프로필 선택 중: {e}")
+        print(f"오류: 로그인/프로필 선택 중: {type(e).__name__}: {e}")
+        try:
+            print(f"현재 URL: {driver.current_url}")
+        except Exception:
+            pass
         if 'driver' in locals():
             driver.quit()
         return None
@@ -172,42 +209,113 @@ def login_and_select_profile_wire():
 def get_episode_links_and_title(driver, anime_id):
     # 재생 페이지 목록에서 링크와 함께 제목도 추출
     try:
+        def collect_player_links_with_wait(selectors, timeout=20, min_count=1):
+            deadline = time.time() + timeout
+            found = []
+            while time.time() < deadline:
+                links = []
+                for selector in selectors:
+                    for element in driver.find_elements(By.CSS_SELECTOR, selector):
+                        href = element.get_attribute("href")
+                        if href and href not in links:
+                            links.append(href)
+                if len(links) >= min_count:
+                    return links
+                found = links
+                time.sleep(0.5)
+            return found
+
         item_page_url = f"https://laftel.net/item/{anime_id}"
         print(f"애니메이션 정보 페이지로 이동: {item_page_url}")
         driver.get(item_page_url)
-        wait = WebDriverWait(driver, 10)
-        
-        header_selector = "#item-modal > div.sc-87dbc590-0.cuzTcb > div.sc-87dbc590-1.ikTlOc > div > header"
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, header_selector)))
-        
-        title_selector = ".sc-b12ebb9a-1"
-        anime_title = driver.find_element(By.CSS_SELECTOR, title_selector).text
+        wait = WebDriverWait(driver, 20)
+
+        title_candidates = [
+            (By.CSS_SELECTOR, "meta[property='og:title']"),
+            (By.CSS_SELECTOR, "h1"),
+            (By.CSS_SELECTOR, ".sc-b12ebb9a-1"),
+        ]
+        anime_title = None
+        for by, selector in title_candidates:
+            try:
+                if by == By.CSS_SELECTOR and selector.startswith("meta"):
+                    element = wait.until(EC.presence_of_element_located((by, selector)))
+                    content = (element.get_attribute("content") or "").strip()
+                    if content:
+                        anime_title = content
+                        break
+                else:
+                    element = wait.until(EC.presence_of_element_located((by, selector)))
+                    text = (element.text or "").strip()
+                    if text:
+                        anime_title = text
+                        break
+            except Exception:
+                continue
+        if not anime_title:
+            raise RuntimeError("제목 요소를 찾지 못했습니다.")
+
         sanitized_title = sanitize_filename(anime_title)
         print(f"애니메이션 제목 '{sanitized_title}' 확인")
-        
-        episode_link_selector = "#item-tab-view > div.sc-8d457a41-1.eNuwum > div > ul > li > a"
-        first_episode_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, episode_link_selector)))
-        player_page_url = first_episode_element.get_attribute('href')
-        
-        print(f"전체 에피소드 목록 확인을 위해 재생 페이지로 이동")
+
+        # 1) item 페이지에서 먼저 에피소드 링크를 수집 (가장 안정적)
+        links = collect_player_links_with_wait(
+            selectors=["#item-tab-view a[href*='/player/']", "a[href*='/player/']"],
+            timeout=20,
+            min_count=2,
+        )
+
+        # item 페이지에서 충분히 수집되면 플레이어 이동 없이 반환
+        if len(links) > 1:
+            print("item 페이지에서 에피소드 목록 로드 확인")
+            print(f"총 {len(links)}개의 에피소드 링크 확보")
+            return links, sanitized_title
+
+        # 2) fallback: 첫 에피소드로 이동 후 플레이어 사이드바에서 수집
+        first_episode_element = None
+        episode_link_candidates = [
+            "#item-tab-view ul li a[href*='/player/']",
+            "a[href*='/player/']",
+        ]
+        for selector in episode_link_candidates:
+            try:
+                first_episode_element = wait.until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                )
+                if first_episode_element:
+                    break
+            except Exception:
+                continue
+        if not first_episode_element:
+            raise RuntimeError("첫 에피소드 링크를 찾지 못했습니다.")
+
+        player_page_url = first_episode_element.get_attribute("href")
+        print("전체 에피소드 목록 확인을 위해 재생 페이지로 이동")
         driver.get(player_page_url)
-        
-        video_player_selector = "#root-video-fullscreen > div > div.sc-aa80e0b2-0.klUxFI"
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, video_player_selector)))
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#root-video-fullscreen")))
         print("비디오 플레이어 로드 확인")
 
-        player_list_container_selector = "#root > div.sc-4a02fa07-0.cSulJK > div > div.sc-822cc31f-3.cVEuQZ > div > aside > div > div > div.simplebar-wrapper > div.simplebar-mask > div > div > div > ul"
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, player_list_container_selector)))
+        links = collect_player_links_with_wait(
+            selectors=["aside a[href*='/player/']", "a[href*='/player/']"],
+            timeout=25,
+            min_count=2,
+        )
+
+        # 3) 마지막 fallback: 페이지 소스에서 /player/ 링크 정규식 추출
+        if not links:
+            for match in re.findall(r'https://laftel\.net/player/\d+/\d+', driver.page_source):
+                if match not in links:
+                    links.append(match)
+
         print("에피소드 목록 로드 확인")
-        
-        player_episode_link_selector = f"{player_list_container_selector} > li > a"
-        episode_elements = driver.find_elements(By.CSS_SELECTOR, player_episode_link_selector)
-        
-        links = [element.get_attribute('href') for element in episode_elements]
         print(f"총 {len(links)}개의 에피소드 링크 확보")
         return links, sanitized_title
     except Exception as e:
-        print(f"오류: 에피소드 링크/제목 추출 중: {e}")
+        print(f"오류: 에피소드 링크/제목 추출 중: {type(e).__name__}: {e}")
+        try:
+            print(f"현재 URL: {driver.current_url}")
+        except Exception:
+            pass
         return [], None
 
 def get_network_data(driver, episode_url):
@@ -256,6 +364,8 @@ def download_episode(driver, link, episode_num, anime_title, download_dir):
         return False, 0 # 실패
     
     try:
+        env = build_process_env()
+        print(f"실행 PATH 헤드: {env['PATH'].split(os.pathsep)[0]}")
         pssh = get_pssh_from_init(mpd_url, lic_headers)
         if not pssh:
             print(f"오류: {episode_num}화 PSSH 확보 실패")
@@ -270,7 +380,7 @@ def download_episode(driver, link, episode_num, anime_title, download_dir):
 
         key_args = [item for sublist in [k.split() for k in keys] for item in sublist]
         command = [
-            'N_m3u8DL-RE', mpd_url,
+            str(N_M3U8DL_RE_EXE), mpd_url,
             '--save-name', save_name,
             '--save-dir', str(download_dir.resolve()),
             '-M', 'format=mkv:muxer=mkvmerge',
@@ -280,7 +390,7 @@ def download_episode(driver, link, episode_num, anime_title, download_dir):
         ] + key_args
         
         print(f"다운로드 시작: {save_name}.mkv")
-        subprocess.run(command)
+        subprocess.run(command, check=True, env=env)
         print(f"{save_name}.mkv 다운로드 완료")
         
         # 다운로드된 파일 크기 확인
@@ -294,17 +404,28 @@ if __name__ == "__main__":
     print(ASCII_ART)
     
     DOWNLOAD_DIR_BASE = Path("./downloads")
+    if not check_external_tools():
+        raise SystemExit(1)
     
     driver = login_and_select_profile_wire()
     if driver:
         episode_links, anime_title = get_episode_links_and_title(driver, ANIME_ID)
-        
+
+        if not anime_title:
+            print("오류: 애니메이션 제목을 가져오지 못해 작업을 중단합니다.")
+            if 'driver' in locals() and driver:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+            raise SystemExit(1)
+
         DOWNLOAD_DIR = DOWNLOAD_DIR_BASE / anime_title
         DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+        total_downloaded_bytes = 0
         if episode_links and anime_title:
             failed_episodes = []
-            total_downloaded_bytes = 0
 
             # 1차 시도
             print(f"\n{'='*20} 1차 다운로드를 시작합니다 ({len(episode_links)}개) {'='*20}")
@@ -346,8 +467,11 @@ if __name__ == "__main__":
 
         print("\n모든 작업 완료. 브라우저를 종료합니다")
         
-        total_gb = total_downloaded_bytes / (1024 ** 3)
-        print(f"총 다운로드 용량: {total_gb:.2f} GB")
+        if total_downloaded_bytes > 0:
+            total_gb = total_downloaded_bytes / (1024 ** 3)
+            print(f"총 다운로드 용량: {total_gb:.2f} GB")
+        else:
+            print("다운로드된 파일이 없습니다.")
 
         if 'driver' in locals() and driver:
             try:
