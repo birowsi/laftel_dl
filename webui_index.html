@@ -1,5 +1,5 @@
 <!-- FILE: webui_index.html -->
-<!-- AI_NOTE: Web frontend page. Calls backend APIs for session/login/download control (including episode ranges) and renders live logs/status/progress. -->
+<!-- AI_NOTE: Web frontend page. Calls backend APIs for session/login/download control plus WebUI-only 500MB split-archive, and renders live status/log stream via SSE. -->
 <!doctype html>
 <html lang="ko">
 <head>
@@ -81,6 +81,15 @@
       width: 180px;
       font-size: 14px;
     }
+    select {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      min-width: 320px;
+      font-size: 14px;
+      background: #fff;
+      color: var(--text);
+    }
     .status {
       font-size: 13px;
       color: var(--sub);
@@ -132,27 +141,41 @@
         <button class="warn" onclick="stopDownload()">중단 요청</button>
         <button class="warn" onclick="shutdownProgram()">프로그램 종료</button>
         <button onclick="refreshStatus()">상태 새로고침</button>
-        <label class="toggle"><input id="autoRefresh" type="checkbox" checked /> 자동 새로고침</label>
+        <label class="toggle"><input id="liveStream" type="checkbox" checked /> 실시간 스트림(SSE)</label>
         <label class="toggle"><input id="autoScroll" type="checkbox" checked /> 로그 자동 스크롤</label>
       </div>
       <div id="statusLine" class="status">상태: 대기</div>
       <pre id="out" class="console">ready</pre>
     </div>
     <div class="card">
+      <h3>분할압축 (WebUI 전용)</h3>
+      <div class="row">
+        <select id="archiveTarget">
+          <option value="">압축할 다운로드 폴더 선택</option>
+        </select>
+        <button onclick="refreshArchiveTargets()">폴더 목록 새로고침</button>
+        <button class="primary" onclick="startSplitArchive()">500MB 분할압축 시작</button>
+      </div>
+      <p class="sub">출력: <code>./archives/&lt;작품명&gt;.7z.001</code> 형식으로 생성됩니다.</p>
+    </div>
+    <div class="card">
       <h3>간단 가이드</h3>
       <ol class="hint">
         <li><strong>세션 확보</strong>를 누르고 브라우저에서 로그인/프로필 선택을 완료합니다.</li>
         <li>작품 ID를 입력하고 <strong>다운로드 시작</strong>을 누릅니다.</li>
-        <li>문제가 생기면 <strong>상태 새로고침</strong>으로 로그를 확인합니다.</li>
+        <li>분할압축은 다운로드 완료 후 폴더를 선택해서 실행합니다.</li>
       </ol>
     </div>
   </div>
   <script>
     const out = document.getElementById("out");
     const statusLine = document.getElementById("statusLine");
-    const autoRefresh = document.getElementById("autoRefresh");
+    const liveStream = document.getElementById("liveStream");
     const autoScroll = document.getElementById("autoScroll");
-    let refreshTimer = null;
+    const archiveTarget = document.getElementById("archiveTarget");
+    const ARCHIVE_SPLIT_SIZE_MB = 500;
+    let stream = null;
+    let streamReconnectTimer = null;
     const setOut = (x) => out.textContent = typeof x === "string" ? x : JSON.stringify(x, null, 2);
     const setStatus = (status) => {
       const p = status.progress || {};
@@ -160,8 +183,16 @@
       const processed = Number(p.processed_episodes || 0);
       const current = p.current_episode ? ` | current=${p.current_episode}화` : "";
       const prog = total > 0 ? ` | progress=${processed}/${total}${current}` : "";
-      const s = `running=${status.running} | has_session=${status.has_session} | stop_requested=${status.stop_requested}${prog}`;
+      const archive = status.archive || {};
+      const archiveTag = archive.running ? "running" : "idle";
+      const s = `running=${status.running} | has_session=${status.has_session} | stop_requested=${status.stop_requested} | archive=${archiveTag}${prog}`;
       statusLine.textContent = `상태: ${s}`;
+    };
+    const applyLogLines = (lines) => {
+      setOut((lines || []).join("\n") || "로그 없음");
+      if (autoScroll.checked) {
+        out.scrollTop = out.scrollHeight;
+      }
     };
 
     async function api(path, options) {
@@ -173,6 +204,44 @@
         throw new Error(detail);
       }
       return data;
+    }
+
+    function disconnectStream() {
+      if (stream) {
+        stream.close();
+        stream = null;
+      }
+      if (streamReconnectTimer) {
+        clearTimeout(streamReconnectTimer);
+        streamReconnectTimer = null;
+      }
+    }
+
+    function scheduleStreamReconnect() {
+      if (!liveStream.checked || streamReconnectTimer) return;
+      streamReconnectTimer = setTimeout(() => {
+        streamReconnectTimer = null;
+        connectStream();
+      }, 1500);
+    }
+
+    function connectStream() {
+      disconnectStream();
+      statusLine.textContent = "상태: 실시간 스트림 연결 중...";
+      stream = new EventSource("/api/stream?limit=200");
+      stream.addEventListener("snapshot", (event) => {
+        try {
+          const payload = JSON.parse(event.data || "{}");
+          setStatus(payload.status || {});
+          applyLogLines(payload.lines || []);
+        } catch (_) {}
+      });
+      stream.addEventListener("ping", () => {});
+      stream.onerror = () => {
+        disconnectStream();
+        statusLine.textContent = "상태: 실시간 스트림 재연결 대기 중...";
+        scheduleStreamReconnect();
+      };
     }
 
     async function ensureSession() {
@@ -199,6 +268,50 @@
         } else {
           setOut(`세션 확보 실패: ${e.message}`);
         }
+      }
+    }
+
+    async function refreshArchiveTargets() {
+      try {
+        const data = await api("/api/archive/list");
+        const previous = archiveTarget.value;
+        archiveTarget.innerHTML = "";
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = "압축할 다운로드 폴더 선택";
+        archiveTarget.appendChild(placeholder);
+
+        (data.titles || []).forEach((title) => {
+          const opt = document.createElement("option");
+          opt.value = title;
+          opt.textContent = title;
+          archiveTarget.appendChild(opt);
+        });
+        if (previous && (data.titles || []).includes(previous)) {
+          archiveTarget.value = previous;
+        }
+      } catch (e) {
+        setOut(`압축 폴더 목록 조회 실패: ${e.message}`);
+      }
+    }
+
+    async function startSplitArchive() {
+      const title = (archiveTarget.value || "").trim();
+      if (!title) {
+        setOut("분할압축 시작 실패: 압축할 폴더를 선택해 주세요.");
+        return;
+      }
+      try {
+        setOut(`분할압축 요청 전송 중... (${title})`);
+        const data = await api("/api/archive/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ anime_title: title, split_size_mb: ARCHIVE_SPLIT_SIZE_MB })
+        });
+        setOut(data);
+        await refreshStatus();
+      } catch (e) {
+        setOut(`분할압축 시작 실패: ${e.message}`);
       }
     }
 
@@ -234,10 +347,7 @@
         const status = await api("/api/status");
         const logs = await api("/api/logs?limit=200");
         setStatus(status);
-        setOut(logs.lines.join("\n") || "로그 없음");
-        if (autoScroll.checked) {
-          out.scrollTop = out.scrollHeight;
-        }
+        applyLogLines(logs.lines || []);
       } catch (e) {
         setOut(`상태 조회 실패: ${e.message}`);
       }
@@ -264,28 +374,27 @@
       }
     }
 
-    function applyAutoRefresh() {
-      if (refreshTimer) {
-        clearInterval(refreshTimer);
-        refreshTimer = null;
+    liveStream.addEventListener("change", () => {
+      if (liveStream.checked) {
+        connectStream();
+      } else {
+        disconnectStream();
       }
-      if (autoRefresh.checked) {
-        refreshTimer = setInterval(refreshStatus, 2000);
-      }
-    }
-
-    autoRefresh.addEventListener("change", applyAutoRefresh);
+    });
     document.addEventListener("visibilitychange", () => {
-      if (document.hidden && refreshTimer) {
-        clearInterval(refreshTimer);
-        refreshTimer = null;
-      } else if (!document.hidden) {
-        applyAutoRefresh();
+      if (document.hidden) {
+        disconnectStream();
+      } else if (liveStream.checked) {
+        connectStream();
       }
     });
 
-    applyAutoRefresh();
-    refreshStatus();
+    if (liveStream.checked) {
+      connectStream();
+    } else {
+      refreshStatus();
+    }
+    refreshArchiveTargets();
   </script>
 </body>
 </html>

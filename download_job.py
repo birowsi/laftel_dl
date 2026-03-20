@@ -1,5 +1,5 @@
 # FILE: download_job.py
-# AI_NOTE: Download executor class with optional event hooks and episode-range filtering. Resolves episodes, captures DRM/network data, classifies failures, and runs retry logic with fast headless fallback.
+# AI_NOTE: Download executor class with optional event hooks and episode-range filtering. Resolves episodes, captures DRM/network data, auto-recovers broken webdriver sessions, and runs retry logic with fast headless fallback.
 import os
 import re
 import subprocess
@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.common.exceptions import (
+    InvalidSessionIdException,
+    NoSuchWindowException,
+    TimeoutException,
+    WebDriverException,
+)
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
@@ -46,6 +51,12 @@ class NetworkCaptureState:
 
 
 class DownloadJob:
+    LINK_POLL_INTERVAL_SEC = 0.5
+    NETWORK_POLL_INTERVAL_SEC = 0.2
+    LICENSE_PROBE_LOG_INTERVAL_SEC = 5
+    PLAYER_TRIGGER_SCRIPT_TIMEOUT_SEC = 5
+    HEADLESS_FIRST_WAIT_SEC = 12
+
     def __init__(
         self,
         driver,
@@ -62,7 +73,6 @@ class DownloadJob:
         self.on_event = on_event
         self.episode_selection = episode_selection
         self.download_dir_base = Path("./downloads")
-        self.headless_license_wait_sec = 12
 
     def _stopped(self):
         return bool(self.should_stop and self.should_stop())
@@ -91,11 +101,37 @@ class DownloadJob:
             return False
 
     @staticmethod
+    def _is_driver_disconnected_exception(exc: Exception) -> bool:
+        if isinstance(exc, (InvalidSessionIdException, NoSuchWindowException)):
+            return True
+        text = str(exc).lower()
+        return (
+            "invalid session id" in text
+            or "session deleted as the browser has closed the connection" in text
+            or "not connected to devtools" in text
+            or "target window already closed" in text
+        )
+
+    def _recover_driver_session(self, episode_num: int) -> bool:
+        print(f"경고: {episode_num}화 처리 전 브라우저 세션 끊김 감지. 드라이버를 재생성합니다.")
+        self._emit("driver_recover_start", episode_num=episode_num)
+        safe_quit_driver(self.driver)
+        self.driver = login_and_select_profile_wire(anime_id=self.anime_id, offscreen=True)
+        if not self.driver:
+            print("오류: 드라이버 세션 복구 실패")
+            self._emit("driver_recover_failed", episode_num=episode_num)
+            return False
+        print("드라이버 세션 복구 완료")
+        self._emit("driver_recover_done", episode_num=episode_num)
+        return True
+
+    @staticmethod
     def _retriable_reason(reason: str) -> bool:
         retriable_reasons = {
             "network_data_missing",
             "pssh_missing",
             "key_missing",
+            "driver_reconnect_failed",
             "downloader_nonzero_exit",
             "unexpected_exception",
         }
@@ -150,7 +186,7 @@ class DownloadJob:
             if len(links) >= min_count:
                 return links
             found = links
-            time.sleep(0.5)
+            time.sleep(self.LINK_POLL_INTERVAL_SEC)
         return found
 
     def get_episode_links_and_title(self):
@@ -417,7 +453,7 @@ class DownloadJob:
 
     def _trigger_player_activity(self):
         try:
-            self.driver.set_script_timeout(5)
+            self.driver.set_script_timeout(self.PLAYER_TRIGGER_SCRIPT_TIMEOUT_SEC)
             self.driver.execute_async_script(
                 """
                 const done = arguments[arguments.length - 1];
@@ -438,7 +474,7 @@ class DownloadJob:
             )
             print("재생 트리거 호출 완료")
         except TimeoutException:
-            print("경고: 재생 트리거 스크립트 타임아웃 (5초)")
+            print(f"경고: 재생 트리거 스크립트 타임아웃 ({self.PLAYER_TRIGGER_SCRIPT_TIMEOUT_SEC}초)")
         except WebDriverException as e:
             print(f"경고: 재생 트리거 WebDriver 예외: {type(e).__name__}: {e}")
         except Exception as e:
@@ -471,7 +507,7 @@ class DownloadJob:
                     if state.mpd_url:
                         print("MPD 요청 감지")
                         break
-                    time.sleep(0.2)
+                    time.sleep(self.NETWORK_POLL_INTERVAL_SEC)
                 else:
                     raise TimeoutError("MPD 요청 타임아웃")
 
@@ -495,8 +531,8 @@ class DownloadJob:
                     now = time.time()
                     if now >= next_probe_log_at:
                         print(f"라이선스 프로브 확인 중... (captured={probe_count})")
-                        next_probe_log_at = now + 5
-                    time.sleep(0.2)
+                        next_probe_log_at = now + self.LICENSE_PROBE_LOG_INTERVAL_SEC
+                    time.sleep(self.NETWORK_POLL_INTERVAL_SEC)
                 recent_urls = (
                     ", ".join(self._shorten_url(u) for u in list(dict.fromkeys(last_probe_urls))[:5])
                     if last_probe_urls
@@ -530,12 +566,32 @@ class DownloadJob:
 
         print(f"\n{'=' * 20} {episode_num}화 처리 시작 {'=' * 20}")
         self._emit("episode_start", episode_num=episode_num, link=link)
-        self.driver.get("about:blank")
+
+        try:
+            self.driver.get("about:blank")
+        except Exception as e:
+            if self._is_driver_disconnected_exception(e):
+                if not self._recover_driver_session(episode_num):
+                    return EpisodeResult(success=False, reason="driver_reconnect_failed", retriable=True)
+                try:
+                    self.driver.get("about:blank")
+                except Exception as e2:
+                    print(f"오류: {episode_num}화 세션 복구 후 초기화 실패: {type(e2).__name__}: {e2}")
+                    self._emit(
+                        "episode_error",
+                        episode_num=episode_num,
+                        reason="driver_reconnect_failed",
+                        retriable=True,
+                    )
+                    return EpisodeResult(success=False, reason="driver_reconnect_failed", retriable=True)
+            else:
+                raise
+
         time.sleep(1)
 
         # first try: 빠르게 1회 탐지하고 실패하면 즉시 모드 전환 판단
         is_headless = self._is_headless_driver()
-        initial_wait_sec = self.headless_license_wait_sec if is_headless else REQUEST_TIMEOUT_SEC
+        initial_wait_sec = self.HEADLESS_FIRST_WAIT_SEC if is_headless else REQUEST_TIMEOUT_SEC
         mpd_url, lic_url, lic_headers = self.get_network_data(
             link,
             retries=0,

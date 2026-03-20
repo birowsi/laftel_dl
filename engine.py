@@ -20,7 +20,7 @@ from runtime_support import (
     safe_quit_driver,
 )
 
-ASCII_ART = """
+ASCII_ART = r"""
     __                        
    / /_  __  __               
   / __ \/ / / /               

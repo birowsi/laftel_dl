@@ -10,11 +10,12 @@ import sys
 import warnings
 from pathlib import Path
 
-warnings.filterwarnings(
-    "ignore",
-    message="pkg_resources is deprecated as an API.*",
-    category=UserWarning,
-)
+if os.environ.get("LAFTEL_SUPPRESS_PKG_RESOURCES_WARNING", "0") == "1":
+    warnings.filterwarnings(
+        "ignore",
+        message="pkg_resources is deprecated as an API.*",
+        category=UserWarning,
+    )
 
 LOGGER = logging.getLogger("laftel")
 

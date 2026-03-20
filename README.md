@@ -18,6 +18,7 @@
 - `binaries/N_m3u8DL-RE.exe`
 - `binaries/mkvmerge.exe`
 - `binaries/mp4decrypt.exe`
+- `7z` 또는 `7za` (WebUI 분할압축 기능 사용 시, 한글 경로는 `7z.exe + 7z.dll` 권장)
 - `yt-dlp` (권장: `pip install -r requirements.txt`로 설치)
 
 ## 설치
@@ -65,7 +66,14 @@ python webui_server.py
 3. 작품 ID 입력
 4. 필요 시 회차 범위 입력 (`1-3,5,7`)
 5. `다운로드 시작` 클릭
-6. 하단 로그/상태 확인
+6. 필요 시 `분할압축 (WebUI 전용)`에서 폴더 선택 후 `500MB 분할압축 시작`
+7. 하단 로그/상태 확인
+
+### WebUI 분할압축
+- 입력: `./downloads/<작품명>/`
+- 출력: `./archives/<작품명>.7z.001`, `.002`, ...
+- 분할 크기: `500MB` 고정
+- 다운로드 실행 중에는 분할압축 시작 불가
 
 ## 동작 메모
 - 세션 확인이 되면 가능하면 헤드리스로 진행합니다.
