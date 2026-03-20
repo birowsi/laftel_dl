@@ -1,3 +1,5 @@
+# FILE: webui_server.py
+# AI_NOTE: FastAPI backend for WebUI. Manages session APIs, download job lifecycle, event-based progress tracking, episode-range inputs, and log/status endpoints.
 import warnings
 import logging
 import os
@@ -28,6 +30,7 @@ HTML_TEMPLATE_PATH = Path(__file__).with_name("webui_index.html")
 class DownloadRequest(BaseModel):
     anime_id: int = Field(default=engine.DEFAULT_ANIME_ID, ge=1)
     max_retries: int = Field(default=5, ge=0, le=20)
+    episodes: Optional[str] = Field(default=None, max_length=200)
 
 
 class RuntimeState:
@@ -40,6 +43,16 @@ class RuntimeState:
         self.last_error = None
         self.worker: Optional[Thread] = None
         self.logs = []
+        self.progress = {
+            "anime_title": None,
+            "total_episodes": 0,
+            "processed_episodes": 0,
+            "success_episodes": 0,
+            "failed_episodes": 0,
+            "current_episode": None,
+            "last_event": None,
+        }
+        self.episode_state = {}
 
 
 def _append_log(message: str):
@@ -59,12 +72,67 @@ class _WebUILogHandler(logging.Handler):
 state = RuntimeState()
 
 
-def _run_download_job(anime_id: int, max_retries: int):
+def _run_download_job(anime_id: int, max_retries: int, episodes: Optional[str] = None):
     web_handler = _WebUILogHandler()
     web_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S"))
     engine.LOGGER.addHandler(web_handler)
+
+    def on_job_event(payload: dict):
+        event = payload.get("event")
+
+        def recompute(progress_dict):
+            values = list(state.episode_state.values())
+            success_count = sum(1 for v in values if v == "success")
+            failed_count = sum(1 for v in values if v == "failed")
+            progress_dict["success_episodes"] = success_count
+            progress_dict["failed_episodes"] = failed_count
+            progress_dict["processed_episodes"] = success_count + failed_count
+
+        with state.lock:
+            progress = state.progress
+            progress["last_event"] = event
+            if event == "episode_list_ready":
+                progress["anime_title"] = payload.get("anime_title")
+                progress["total_episodes"] = int(payload.get("count") or 0)
+            elif event == "episode_start":
+                progress["current_episode"] = payload.get("episode_num")
+            elif event == "episode_done":
+                episode_num = payload.get("episode_num")
+                if episode_num is not None:
+                    state.episode_state[int(episode_num)] = "success"
+                recompute(progress)
+                progress["current_episode"] = None
+            elif event == "episode_error":
+                episode_num = payload.get("episode_num")
+                retriable = bool(payload.get("retriable"))
+                if episode_num is not None and not retriable:
+                    state.episode_state[int(episode_num)] = "failed"
+                recompute(progress)
+                progress["current_episode"] = None
+            elif event == "episode_skipped":
+                episode_num = payload.get("episode_num")
+                if episode_num is not None:
+                    state.episode_state[int(episode_num)] = "success"
+                recompute(progress)
+            elif event == "job_done":
+                progress["anime_title"] = payload.get("anime_title")
+                progress["total_episodes"] = int(payload.get("episode_count") or progress["total_episodes"] or 0)
+                failed = int(payload.get("failed_count") or 0)
+                total = int(progress["total_episodes"] or 0)
+                progress["failed_episodes"] = failed
+                progress["success_episodes"] = max(total - failed, 0)
+                progress["processed_episodes"] = min(total, progress["success_episodes"] + progress["failed_episodes"])
+                progress["current_episode"] = None
+
+        if event == "episode_start":
+            _append_log(f"회차 시작: {payload.get('episode_num')}화")
+        elif event == "episode_done":
+            _append_log(f"회차 완료: {payload.get('episode_num')}화")
+        elif event == "episode_error":
+            _append_log(f"회차 실패: {payload.get('episode_num')}화 ({payload.get('reason')})")
+
     try:
-        _append_log(f"다운로드 작업 시작: anime_id={anime_id}, max_retries={max_retries}")
+        _append_log(f"다운로드 작업 시작: anime_id={anime_id}, max_retries={max_retries}, episodes={episodes or 'ALL'}")
         with state.lock:
             driver = state.driver
         if not driver:
@@ -86,6 +154,8 @@ def _run_download_job(anime_id: int, max_retries: int):
             anime_id,
             max_retries=max_retries,
             should_stop=lambda: state.stop_requested,
+            on_event=on_job_event,
+            episode_selection=episodes,
         )
         with state.lock:
             state.driver = driver
@@ -190,7 +260,15 @@ def login_session():
 
 @app.post("/api/download/start")
 def start_download(req: DownloadRequest):
-    request_log = f"다운로드 요청 수신: anime_id={req.anime_id}, max_retries={req.max_retries}"
+    try:
+        engine.validate_episode_selection(req.episodes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"회차 입력 형식 오류: {e}") from e
+
+    request_log = (
+        f"다운로드 요청 수신: anime_id={req.anime_id}, max_retries={req.max_retries}, "
+        f"episodes={req.episodes or 'ALL'}"
+    )
     with state.lock:
         if state.running:
             raise HTTPException(status_code=409, detail="이미 다운로드가 실행 중입니다.")
@@ -201,7 +279,21 @@ def start_download(req: DownloadRequest):
         state.last_result = None
         state.last_error = None
         state.logs = []
-        state.worker = Thread(target=_run_download_job, args=(req.anime_id, req.max_retries), daemon=True)
+        state.progress = {
+            "anime_title": None,
+            "total_episodes": 0,
+            "processed_episodes": 0,
+            "success_episodes": 0,
+            "failed_episodes": 0,
+            "current_episode": None,
+            "last_event": "job_queued",
+        }
+        state.episode_state = {}
+        state.worker = Thread(
+            target=_run_download_job,
+            args=(req.anime_id, req.max_retries, req.episodes),
+            daemon=True,
+        )
         state.worker.start()
     _append_log(request_log)
     _append_log("다운로드 작업 스레드 시작")
@@ -227,6 +319,7 @@ def get_status():
             "has_session": state.driver is not None,
             "last_result": state.last_result,
             "last_error": state.last_error,
+            "progress": state.progress,
         }
 
 

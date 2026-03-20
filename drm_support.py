@@ -1,0 +1,124 @@
+# FILE: drm_support.py
+# AI_NOTE: DRM helper module. Extracts PSSH and obtains Widevine decryption keys from license requests.
+import base64
+import subprocess
+from pathlib import Path
+
+import httpx
+from pywidevine.cdm import Cdm
+from pywidevine.device import Device
+from pywidevine.pssh import PSSH
+
+from runtime_support import (
+    HTTP_TIMEOUT_SEC,
+    WVD_PATH,
+    build_process_env,
+    log_print,
+)
+
+
+def find_wv_pssh_offsets(raw: bytes) -> list:
+    offsets = []
+    offset = 0
+    while True:
+        offset = raw.find(b"pssh", offset)
+        if offset == -1:
+            break
+        size = int.from_bytes(raw[offset - 4:offset], byteorder="big")
+        pssh_offset = offset - 4
+        offsets.append(raw[pssh_offset:pssh_offset + size])
+        offset += size
+    return offsets
+
+
+def to_pssh(content: bytes) -> list:
+    wv_offsets = find_wv_pssh_offsets(content)
+    return [base64.b64encode(wv_offset).decode() for wv_offset in wv_offsets]
+
+
+def get_pssh_from_init(mpd_url, headers):
+    log_print("  - init.m4f 파일에서 PSSH 추출 시도")
+    init_file = Path("init.m4f")
+    if init_file.exists():
+        init_file.unlink()
+    try:
+        header_args = []
+        user_agent = headers.get("user-agent")
+        if user_agent:
+            header_args.extend(["--user-agent", user_agent])
+        command = [
+            "yt-dlp",
+            "--no-warnings",
+            "--quiet",
+            "--test",
+            "--allow-unplayable-formats",
+            "-f",
+            "bestvideo[ext=mp4]",
+            "-o",
+            str(init_file.resolve()),
+            mpd_url,
+        ] + header_args
+        subprocess.run(command, check=True, capture_output=True, env=build_process_env())
+        if not init_file.exists():
+            log_print("  - 오류: init.m4f 파일 다운로드 실패")
+            return None
+        pssh_list = to_pssh(init_file.read_bytes())
+        pssh = None
+        for target_pssh in pssh_list:
+            if 20 < len(target_pssh) < 220:
+                pssh = target_pssh
+                break
+        if pssh:
+            log_print(f"  - PSSH 추출 성공: {pssh[:40]}...")
+            return pssh
+        log_print("  - 오류: init.m4f에서 PSSH 탐색 실패")
+        return None
+    except Exception as e:
+        log_print(f"  - 오류: init.m4f 처리 중: {e}")
+        return None
+    finally:
+        if init_file.exists():
+            init_file.unlink()
+
+
+def get_key_original(pssh, license_url, headers):
+    cdm = None
+    session_id = None
+    try:
+        device = Device.load(WVD_PATH)
+        cdm = Cdm.from_device(device)
+        session_id = cdm.open()
+        challenge = cdm.get_license_challenge(session_id, PSSH(pssh))
+
+        pallycon_header = headers.get("pallycon-customdata-v2")
+        if not pallycon_header:
+            raise ValueError("pallycon-customdata-v2 헤더 탐색 실패")
+
+        request_headers = {
+            "pallycon-customdata-v2": pallycon_header,
+            "Content-Type": "application/octet-stream",
+        }
+
+        lic_response = httpx.post(
+            url=license_url,
+            data=challenge,
+            headers=request_headers,
+            timeout=HTTP_TIMEOUT_SEC,
+        )
+        lic_response.raise_for_status()
+
+        cdm.parse_license(session_id, lic_response.content)
+        keys = []
+        for key in cdm.get_keys(session_id):
+            if key.type == "CONTENT":
+                keys.append(f"--key {key.kid.hex}:{key.key.hex()}")
+        return keys
+    except Exception as e:
+        log_print(f"오류: 키 추출 중: {e}")
+        return None
+    finally:
+        if cdm is not None and session_id is not None:
+            try:
+                cdm.close(session_id)
+            except Exception:
+                pass

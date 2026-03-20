@@ -1,3 +1,5 @@
+<!-- FILE: webui_index.html -->
+<!-- AI_NOTE: Web frontend page. Calls backend APIs for session/login/download control (including episode ranges) and renders live logs/status/progress. -->
 <!doctype html>
 <html lang="ko">
 <head>
@@ -125,6 +127,7 @@
       <div class="row">
         <button class="primary" onclick="ensureSession()">세션 확보</button>
         <input id="animeId" type="number" value="__DEFAULT_ANIME_ID__" />
+        <input id="episodes" type="text" placeholder="회차 범위 (예: 1-3,5,7)" />
         <button class="primary" onclick="startDownload()">다운로드 시작</button>
         <button class="warn" onclick="stopDownload()">중단 요청</button>
         <button class="warn" onclick="shutdownProgram()">프로그램 종료</button>
@@ -152,7 +155,12 @@
     let refreshTimer = null;
     const setOut = (x) => out.textContent = typeof x === "string" ? x : JSON.stringify(x, null, 2);
     const setStatus = (status) => {
-      const s = `running=${status.running} | has_session=${status.has_session} | stop_requested=${status.stop_requested}`;
+      const p = status.progress || {};
+      const total = Number(p.total_episodes || 0);
+      const processed = Number(p.processed_episodes || 0);
+      const current = p.current_episode ? ` | current=${p.current_episode}화` : "";
+      const prog = total > 0 ? ` | progress=${processed}/${total}${current}` : "";
+      const s = `running=${status.running} | has_session=${status.has_session} | stop_requested=${status.stop_requested}${prog}`;
       statusLine.textContent = `상태: ${s}`;
     };
 
@@ -198,6 +206,7 @@
       let dotsTimer = null;
       try {
         const animeId = Number(document.getElementById("animeId").value || "0");
+        const episodes = (document.getElementById("episodes").value || "").trim();
         let dots = 0;
         setOut("다운로드 시작 요청 전송 중...");
         statusLine.textContent = "상태: 다운로드 요청 처리 중";
@@ -209,7 +218,7 @@
         const data = await api("/api/download/start", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ anime_id: animeId, max_retries: 5 })
+          body: JSON.stringify({ anime_id: animeId, max_retries: 5, episodes: episodes || null })
         });
         setOut(data);
         await refreshStatus();
