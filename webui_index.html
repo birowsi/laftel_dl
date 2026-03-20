@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>laftel downloader</title>
+  <style>
+    :root {
+      --bg: #f5f7f9;
+      --card: #ffffff;
+      --text: #1f2937;
+      --sub: #6b7280;
+      --line: #d1d5db;
+      --accent: #0f766e;
+      --accent-2: #0d9488;
+      --danger: #b91c1c;
+      --console-bg: #111827;
+      --console-text: #e5e7eb;
+    }
+    body {
+      margin: 0;
+      font-family: "Pretendard", "Noto Sans KR", "Segoe UI", sans-serif;
+      color: var(--text);
+      background: linear-gradient(180deg, #f8fafc 0%, var(--bg) 100%);
+    }
+    .wrap {
+      max-width: 920px;
+      margin: 24px auto 40px;
+      padding: 0 16px;
+    }
+    .banner {
+      background: #0b1220;
+      color: #86efac;
+      padding: 10px 12px;
+      border-radius: 10px;
+      overflow-x: auto;
+      border: 1px solid #1f2937;
+      margin-bottom: 12px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 12px;
+    }
+    h1 { margin: 0 0 6px; font-size: 1.35rem; }
+    p.sub { margin: 0; color: var(--sub); }
+    .row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    button {
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    button.primary:hover { background: var(--accent-2); }
+    button.warn {
+      background: #fff;
+      color: var(--danger);
+      border-color: #fecaca;
+    }
+    input {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      width: 180px;
+      font-size: 14px;
+    }
+    .status {
+      font-size: 13px;
+      color: var(--sub);
+      margin-bottom: 8px;
+      word-break: break-all;
+    }
+    .console {
+      background: var(--console-bg);
+      color: var(--console-text);
+      border-radius: 10px;
+      padding: 12px;
+      min-height: 220px;
+      max-height: 420px;
+      overflow: auto;
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .hint {
+      margin: 0;
+      padding-left: 18px;
+      color: #374151;
+      font-size: 14px;
+    }
+    .hint li { margin: 4px 0; }
+    .toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: var(--sub);
+      user-select: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <pre class="banner">__ASCII_ART__</pre>
+    <div class="card">
+      <h1>laftel downloader</h1>
+      <p class="sub">세션 확보 후 다운로드를 시작하세요. 모든 동작은 API를 통해 처리됩니다.</p>
+    </div>
+    <div class="card">
+      <div class="row">
+        <button class="primary" onclick="ensureSession()">세션 확보</button>
+        <input id="animeId" type="number" value="__DEFAULT_ANIME_ID__" />
+        <button class="primary" onclick="startDownload()">다운로드 시작</button>
+        <button class="warn" onclick="stopDownload()">중단 요청</button>
+        <button class="warn" onclick="shutdownProgram()">프로그램 종료</button>
+        <button onclick="refreshStatus()">상태 새로고침</button>
+        <label class="toggle"><input id="autoRefresh" type="checkbox" checked /> 자동 새로고침</label>
+        <label class="toggle"><input id="autoScroll" type="checkbox" checked /> 로그 자동 스크롤</label>
+      </div>
+      <div id="statusLine" class="status">상태: 대기</div>
+      <pre id="out" class="console">ready</pre>
+    </div>
+    <div class="card">
+      <h3>간단 가이드</h3>
+      <ol class="hint">
+        <li><strong>세션 확보</strong>를 누르고 브라우저에서 로그인/프로필 선택을 완료합니다.</li>
+        <li>작품 ID를 입력하고 <strong>다운로드 시작</strong>을 누릅니다.</li>
+        <li>문제가 생기면 <strong>상태 새로고침</strong>으로 로그를 확인합니다.</li>
+      </ol>
+    </div>
+  </div>
+  <script>
+    const out = document.getElementById("out");
+    const statusLine = document.getElementById("statusLine");
+    const autoRefresh = document.getElementById("autoRefresh");
+    const autoScroll = document.getElementById("autoScroll");
+    let refreshTimer = null;
+    const setOut = (x) => out.textContent = typeof x === "string" ? x : JSON.stringify(x, null, 2);
+    const setStatus = (status) => {
+      const s = `running=${status.running} | has_session=${status.has_session} | stop_requested=${status.stop_requested}`;
+      statusLine.textContent = `상태: ${s}`;
+    };
+
+    async function api(path, options) {
+      const res = await fetch(path, options);
+      let data = null;
+      try { data = await res.json(); } catch (_) { data = { detail: "응답 파싱 실패" }; }
+      if (!res.ok) {
+        const detail = data?.detail ?? `HTTP ${res.status}`;
+        throw new Error(detail);
+      }
+      return data;
+    }
+
+    async function ensureSession() {
+      try {
+        setOut("세션 확보 중...");
+        const data = await api("/api/session/ensure", { method: "POST" });
+        setOut(data);
+        await refreshStatus();
+      } catch (e) {
+        if (e.message.includes("로그인이 필요합니다")) {
+          const ok = confirm("로그인이 필요합니다. 로그인 창을 열까요?");
+          if (!ok) {
+            setOut("로그인 필요: 사용자 취소");
+            return;
+          }
+          try {
+            setOut("로그인 창 여는 중...");
+            const data = await api("/api/session/login", { method: "POST" });
+            setOut(data);
+            await refreshStatus();
+          } catch (err) {
+            setOut(`로그인 실패: ${err.message}`);
+          }
+        } else {
+          setOut(`세션 확보 실패: ${e.message}`);
+        }
+      }
+    }
+
+    async function startDownload() {
+      let dotsTimer = null;
+      try {
+        const animeId = Number(document.getElementById("animeId").value || "0");
+        let dots = 0;
+        setOut("다운로드 시작 요청 전송 중...");
+        statusLine.textContent = "상태: 다운로드 요청 처리 중";
+        dotsTimer = setInterval(() => {
+          dots = (dots + 1) % 4;
+          statusLine.textContent = `상태: 다운로드 요청 처리 중${".".repeat(dots)}`;
+        }, 400);
+
+        const data = await api("/api/download/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ anime_id: animeId, max_retries: 5 })
+        });
+        setOut(data);
+        await refreshStatus();
+      } catch (e) {
+        setOut(`다운로드 시작 실패: ${e.message}`);
+      } finally {
+        if (dotsTimer) clearInterval(dotsTimer);
+      }
+    }
+
+    async function refreshStatus() {
+      try {
+        const status = await api("/api/status");
+        const logs = await api("/api/logs?limit=200");
+        setStatus(status);
+        setOut(logs.lines.join("\n") || "로그 없음");
+        if (autoScroll.checked) {
+          out.scrollTop = out.scrollHeight;
+        }
+      } catch (e) {
+        setOut(`상태 조회 실패: ${e.message}`);
+      }
+    }
+
+    async function stopDownload() {
+      try {
+        const data = await api("/api/download/stop", { method: "POST" });
+        setOut(data);
+        await refreshStatus();
+      } catch (e) {
+        setOut(`중단 요청 실패: ${e.message}`);
+      }
+    }
+
+    async function shutdownProgram() {
+      if (!confirm("프로그램을 종료하시겠습니까? 실행 중인 서버가 종료됩니다.")) return;
+      try {
+        const data = await api("/api/system/shutdown", { method: "POST" });
+        setOut(data);
+        statusLine.textContent = "상태: 종료 요청 전송됨";
+      } catch (e) {
+        setOut(`프로그램 종료 실패: ${e.message}`);
+      }
+    }
+
+    function applyAutoRefresh() {
+      if (refreshTimer) {
+        clearInterval(refreshTimer);
+        refreshTimer = null;
+      }
+      if (autoRefresh.checked) {
+        refreshTimer = setInterval(refreshStatus, 2000);
+      }
+    }
+
+    autoRefresh.addEventListener("change", applyAutoRefresh);
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden && refreshTimer) {
+        clearInterval(refreshTimer);
+        refreshTimer = null;
+      } else if (!document.hidden) {
+        applyAutoRefresh();
+      }
+    });
+
+    applyAutoRefresh();
+    refreshStatus();
+  </script>
+</body>
+</html>
