@@ -621,6 +621,7 @@ class DownloadJob:
         encoding = locale.getpreferredencoding(False) or "utf-8"
         progress_re = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
         last_ui_percent = 75
+        verbose_binary_logs = os.environ.get("LAFTEL_VERBOSE_BINARIES", "0") == "1"
 
         process = subprocess.Popen(
             command,
@@ -643,6 +644,8 @@ class DownloadJob:
                 stripped = line.strip()
                 if not stripped:
                     continue
+                if verbose_binary_logs:
+                    print(f"[N_m3u8DL] {stripped}")
 
                 matches = [float(m.group(1)) for m in progress_re.finditer(stripped)]
                 if not matches:

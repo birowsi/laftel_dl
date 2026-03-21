@@ -220,18 +220,28 @@ def _run_download_job(anime_id: int, max_retries: int, episodes: Optional[str] =
             episode_selection=episodes,
         )
         with state.lock:
-            state.driver = driver
+            state.driver = None
             state.last_result = result
             state.last_error = None
+            set_session_phase_locked("idle", "다운로드 종료로 세션을 정리했습니다. 다시 시작하려면 세션 확보를 눌러 주세요.")
             touch_state_locked()
+        engine.safe_quit_driver(driver)
+        driver = None
         append_log(
             f"다운로드 요약: title={result.get('anime_title')} | episodes={result.get('episode_count')} | "
             f"failed={result.get('failed_count')} | bytes={result.get('downloaded_bytes')}"
         )
-        append_log("다운로드 작업 종료: 성공")
+        append_log("다운로드 작업 종료: 성공 (브라우저 세션 정리 완료)")
     except Exception as e:
+        try:
+            if driver:
+                engine.safe_quit_driver(driver)
+        except Exception:
+            pass
         with state.lock:
+            state.driver = None
             state.last_error = f"{type(e).__name__}: {e}"
+            set_session_phase_locked("idle", "오류로 작업이 중단되어 세션을 정리했습니다.")
             touch_state_locked()
         append_log(f"다운로드 작업 오류: {type(e).__name__}: {e}")
     finally:
@@ -683,3 +693,10 @@ if __name__ == "__main__":
         _uvicorn_server.run()
     except KeyboardInterrupt:
         pass
+    finally:
+        with state.lock:
+            driver = state.driver
+            state.driver = None
+            touch_state_locked()
+        if driver:
+            engine.safe_quit_driver(driver)

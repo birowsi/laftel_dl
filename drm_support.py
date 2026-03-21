@@ -1,7 +1,9 @@
 # FILE: drm_support.py
 # AI_NOTE: DRM helper module. Extracts PSSH and obtains Widevine decryption keys from license requests.
 import base64
+import os
 import subprocess
+import shutil
 from pathlib import Path
 
 import httpx
@@ -10,6 +12,7 @@ from pywidevine.device import Device
 from pywidevine.pssh import PSSH
 
 from runtime_support import (
+    BINARY_DIR,
     HTTP_TIMEOUT_SEC,
     WVD_PATH,
     build_process_env,
@@ -42,15 +45,38 @@ def get_pssh_from_init(mpd_url, headers):
     if init_file.exists():
         init_file.unlink()
     try:
+        env = build_process_env()
+        # yt-dlp 단계에서는 깨진 ffmpeg 바이너리(binaries/ffmpeg.exe) 자동 호출을 피한다.
+        # 일부 배포본은 avcodec DLL 의존성이 맞지 않아 GUI 오류창을 띄울 수 있다.
+        path_items = [p for p in env.get("PATH", "").split(os.pathsep) if p]
+        path_items = [p for p in path_items if Path(p).resolve() != BINARY_DIR]
+        env["PATH"] = os.pathsep.join(path_items)
+        yt_dlp = shutil.which("yt-dlp", path=env.get("PATH", ""))
+        if not yt_dlp:
+            fallback_candidates = [
+                Path("./.venv/Scripts/yt-dlp.exe").resolve(),
+                Path("./binaries/yt-dlp.exe").resolve(),
+                Path("./yt-dlp.exe").resolve(),
+            ]
+            for candidate in fallback_candidates:
+                if candidate.exists():
+                    yt_dlp = str(candidate)
+                    break
+        if not yt_dlp:
+            log_print("  - 오류: yt-dlp 실행 파일을 찾지 못했습니다.")
+            return None
+
         header_args = []
         user_agent = headers.get("user-agent")
         if user_agent:
             header_args.extend(["--user-agent", user_agent])
         command = [
-            "yt-dlp",
+            yt_dlp,
             "--no-warnings",
             "--quiet",
             "--test",
+            "--downloader",
+            "native",
             "--allow-unplayable-formats",
             "-f",
             "bestvideo[ext=mp4]",
@@ -58,7 +84,13 @@ def get_pssh_from_init(mpd_url, headers):
             str(init_file.resolve()),
             mpd_url,
         ] + header_args
-        subprocess.run(command, check=True, capture_output=True, env=build_process_env())
+        verbose_binary_logs = os.environ.get("LAFTEL_VERBOSE_BINARIES", "0") == "1"
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=not verbose_binary_logs,
+            env=env,
+        )
         if not init_file.exists():
             log_print("  - 오류: init.m4f 파일 다운로드 실패")
             return None
@@ -72,6 +104,13 @@ def get_pssh_from_init(mpd_url, headers):
             log_print(f"  - PSSH 추출 성공: {pssh[:40]}...")
             return pssh
         log_print("  - 오류: init.m4f에서 PSSH 탐색 실패")
+        return None
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or b"").decode(errors="replace") if isinstance(e.stderr, (bytes, bytearray)) else str(e.stderr or "")
+        stdout = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, (bytes, bytearray)) else str(e.stdout or "")
+        detail = (stderr or stdout or "").strip().splitlines()
+        tail = detail[-1] if detail else f"exit={e.returncode}"
+        log_print(f"  - 오류: init.m4f 처리 실패 (yt-dlp): {tail}")
         return None
     except Exception as e:
         log_print(f"  - 오류: init.m4f 처리 중: {e}")
