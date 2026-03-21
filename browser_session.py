@@ -21,7 +21,39 @@ from runtime_support import (
 )
 
 
-DEFAULT_ANIME_ID = 40846
+DEFAULT_ANIME_ID = 16074
+
+
+def has_persisted_profile_data() -> bool:
+    profile_dir = Path("./.chrome-profile").resolve()
+    if not profile_dir.exists() or not profile_dir.is_dir():
+        return False
+    try:
+        return any(profile_dir.iterdir())
+    except Exception:
+        return False
+
+
+def is_captcha_challenge_visible(driver) -> bool:
+    try:
+        current = (driver.current_url or "").lower()
+    except Exception:
+        current = ""
+    if any(token in current for token in ("recaptcha", "/sorry/", "challenge")):
+        return True
+    try:
+        page_text = (driver.page_source or "").lower()
+    except Exception:
+        return False
+    markers = (
+        "i'm not a robot",
+        "unusual traffic",
+        "자동화된",
+        "로봇이 아닙니까",
+        "로봇이 아닙니다",
+        "recaptcha",
+    )
+    return any(marker in page_text for marker in markers)
 
 
 def _driver_get_safe(driver, url: str) -> bool:
@@ -47,7 +79,13 @@ def is_login_url(url):
 
 
 def is_home_url(url):
-    return (url or "").lower().rstrip("/") == "https://laftel.net"
+    normalized = (url or "").lower().rstrip("/")
+    return normalized.startswith("https://laftel.net") and ("/auth/" not in normalized)
+
+
+def is_profile_selection_url(url: str) -> bool:
+    normalized = (url or "").lower()
+    return "/profiles" in normalized or "/profile" in normalized
 
 
 def has_authenticated_player_access(driver, anime_id=DEFAULT_ANIME_ID):
@@ -59,6 +97,9 @@ def has_authenticated_player_access(driver, anime_id=DEFAULT_ANIME_ID):
             original_url = None
         item_url = f"https://laftel.net/item/{anime_id}"
         if not _driver_get_safe(driver, item_url):
+            return False
+        if is_captcha_challenge_visible(driver):
+            print("경고: 캡차/봇 확인 페이지가 감지되었습니다. 수동 확인이 필요합니다.")
             return False
         wait = WebDriverWait(driver, 20)
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='/player/']")))
@@ -72,6 +113,9 @@ def has_authenticated_player_access(driver, anime_id=DEFAULT_ANIME_ID):
             return False
 
         if not _driver_get_safe(driver, player_url):
+            return False
+        if is_captcha_challenge_visible(driver):
+            print("경고: 플레이어 접근 중 캡차/봇 확인 페이지가 감지되었습니다.")
             return False
         time.sleep(1)
         if is_login_url(driver.current_url):
@@ -116,19 +160,18 @@ def create_webdriver_with_profile(headless=False, offscreen=False):
     )
     chrome_options.add_argument("--mute-audio")
     chrome_options.add_argument("--autoplay-policy=no-user-gesture-required")
-    if headless:
-        chrome_options.add_argument("--headless=new")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--window-size=1920,1080")
-        chrome_options.add_argument("--no-first-run")
-        chrome_options.add_argument("--no-default-browser-check")
-        chrome_options.add_argument("--disable-background-networking")
-        chrome_options.add_argument("--disable-component-update")
-        chrome_options.add_argument("--disable-features=TranslateUI")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-    elif offscreen:
+    # NOTE: 현재는 headless를 사용하지 않고 offscreen visible 단일 경로로 운영한다.
+    # 기존 호출부 호환을 위해 headless=True가 들어와도 offscreen visible로 처리한다.
+    if headless or offscreen:
         chrome_options.add_argument("--window-size=1920,1080")
         chrome_options.add_argument("--window-position=-32000,-32000")
+        # 게임/전체화면 앱 방해를 줄이기 위해 시작 시 최소화 상태를 요청한다.
+        chrome_options.add_argument("--start-minimized")
+    else:
+        # offscreen 세션에서 같은 프로필을 재사용하면 이전 창 좌표가 남을 수 있어
+        # 로그인용 visible 창은 항상 화면 안쪽 좌표로 강제 배치한다.
+        chrome_options.add_argument("--window-size=1366,900")
+        chrome_options.add_argument("--window-position=80,80")
 
     profile_dir = Path("./.chrome-profile").resolve()
     profile_dir.mkdir(parents=True, exist_ok=True)
@@ -153,9 +196,9 @@ def create_webdriver_with_profile(headless=False, offscreen=False):
     return driver
 
 
-def ensure_logged_in(driver, anime_id=DEFAULT_ANIME_ID):
+def ensure_logged_in(driver, anime_id=DEFAULT_ANIME_ID, precheck_session=True):
     try:
-        if has_authenticated_player_access(driver, anime_id=anime_id):
+        if precheck_session and has_authenticated_player_access(driver, anime_id=anime_id):
             print("기존 로그인 세션을 확인했습니다. 바로 진행합니다.")
             return True
 
@@ -165,25 +208,40 @@ def ensure_logged_in(driver, anime_id=DEFAULT_ANIME_ID):
         print(f"완료되면 자동 감지합니다. (최대 {LOGIN_WAIT_TIMEOUT_SEC}초 대기)")
 
         deadline = time.time() + LOGIN_WAIT_TIMEOUT_SEC
+        last_auth_check_at = 0.0
+        last_hint_at = 0.0
         prompted_retry = False
         while time.time() < deadline:
-            current_url = driver.current_url or ""
+            try:
+                current_url = driver.current_url or ""
+            except Exception as e:
+                print(f"경고: 로그인 상태 확인 중 드라이버 연결이 끊겼습니다: {type(e).__name__}: {e}")
+                return False
             if is_login_url(current_url):
                 time.sleep(1)
                 continue
-
-            if not is_home_url(current_url):
+            if is_profile_selection_url(current_url):
+                # 프로필 선택 화면에서는 페이지 강제 이동을 하지 않고 사용자 입력을 기다린다.
                 time.sleep(1)
                 continue
+            if is_captcha_challenge_visible(driver):
+                print("오류: 캡차/봇 확인 페이지가 감지되었습니다. 브라우저에서 캡차를 완료한 뒤 다시 시도해 주세요.")
+                return False
 
-            if has_authenticated_player_access(driver, anime_id=anime_id):
-                print("로그인 완료를 감지했습니다.")
-                return True
+            now = time.time()
+            # 프로필 선택을 마친 뒤 홈으로 돌아온 시점에서만 실제 접근 가능 여부를 확인한다.
+            if is_home_url(current_url) and (now - last_auth_check_at >= 2.5):
+                if has_authenticated_player_access(driver, anime_id=anime_id):
+                    print("로그인 완료를 감지했습니다.")
+                    return True
+                last_auth_check_at = now
 
             if not prompted_retry:
                 print("로그인 상태를 아직 확인하지 못했습니다. 로그인/프로필 선택을 다시 확인해 주세요.")
                 prompted_retry = True
-            driver.get("https://laftel.net/auth/login")
+            if (not is_home_url(current_url)) and (now - last_hint_at >= 8):
+                print(f"현재 페이지 확인 중: {current_url}")
+                last_hint_at = now
             time.sleep(1)
 
         raise RuntimeError(f"로그인 대기 시간 초과 ({LOGIN_WAIT_TIMEOUT_SEC}초)")
@@ -196,39 +254,65 @@ def ensure_logged_in(driver, anime_id=DEFAULT_ANIME_ID):
         return False
 
 
-def login_and_select_profile_wire(anime_id=DEFAULT_ANIME_ID, offscreen=False):
+def login_and_select_profile_wire(anime_id=DEFAULT_ANIME_ID, offscreen=False, precheck_session=True):
     driver = create_webdriver_with_profile(headless=False, offscreen=offscreen)
-    if ensure_logged_in(driver, anime_id=anime_id):
+    if ensure_logged_in(driver, anime_id=anime_id, precheck_session=precheck_session):
         return driver
     safe_quit_driver(driver)
     return None
 
 
 def recreate_driver_headless(existing_driver, anime_id=DEFAULT_ANIME_ID):
+    # NOTE: 함수명은 호환성을 위해 유지하지만 내부 동작은 offscreen visible 재생성이다.
     safe_quit_driver(existing_driver)
-    driver = create_webdriver_with_profile(headless=True)
+    driver = create_webdriver_with_profile(headless=False, offscreen=True)
     if not has_authenticated_player_access(driver, anime_id=anime_id):
         safe_quit_driver(driver)
         return None
     return driver
 
 
+def try_replace_with_headless(existing_driver, anime_id=DEFAULT_ANIME_ID):
+    # NOTE: 함수명은 호환성을 위해 유지하지만 내부 동작은 offscreen visible 교체다.
+    driver = create_webdriver_with_profile(headless=False, offscreen=True)
+    if not has_authenticated_player_access(driver, anime_id=anime_id):
+        safe_quit_driver(driver)
+        return None
+    safe_quit_driver(existing_driver)
+    return driver
+
+
 def get_headless_driver_if_session_exists(anime_id=DEFAULT_ANIME_ID):
-    headless = create_webdriver_with_profile(headless=True)
-    if has_authenticated_player_access(headless, anime_id=anime_id):
-        return headless
-    safe_quit_driver(headless)
+    if not has_persisted_profile_data():
+        print("저장된 크롬 프로필이 없어 세션 확인을 건너뜁니다.")
+        return None
+    driver = create_webdriver_with_profile(headless=False, offscreen=True)
+    if has_authenticated_player_access(driver, anime_id=anime_id):
+        return driver
+    safe_quit_driver(driver)
     return None
 
 
 def get_or_login_headless_driver(anime_id=DEFAULT_ANIME_ID):
-    headless = create_webdriver_with_profile(headless=True)
+    if not has_persisted_profile_data():
+        visible = create_webdriver_with_profile(headless=False)
+        try:
+            if not ensure_logged_in(visible, anime_id=anime_id):
+                safe_quit_driver(visible)
+                return None
+            return recreate_driver_headless(visible, anime_id=anime_id)
+        except Exception as e:
+            print(f"오류: 로그인 드라이버 처리 중 예외 발생: {type(e).__name__}: {e}")
+            safe_quit_driver(visible)
+            return None
+
+    driver = create_webdriver_with_profile(headless=False, offscreen=True)
     try:
-        if has_authenticated_player_access(headless, anime_id=anime_id):
-            return headless
+        if has_authenticated_player_access(driver, anime_id=anime_id):
+            return driver
     except Exception as e:
-        print(f"경고: 헤드리스 세션 확인 중 예외 발생: {type(e).__name__}: {e}")
-    safe_quit_driver(headless)
+        print(f"경고: 세션 확인 중 예외 발생: {type(e).__name__}: {e}")
+    safe_quit_driver(driver)
 
     visible = create_webdriver_with_profile(headless=False)
     try:

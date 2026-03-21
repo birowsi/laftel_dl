@@ -1,31 +1,84 @@
 # Laftel Downloader
 
-라프텔 작품 ID 기준으로 회차를 수집하고, DRM 키를 추출해서 파일로 저장하는 스크립트입니다.
+라프텔 작품 ID 기준으로 회차를 수집하고, 네트워크/DRM 흐름을 확인해 다운로드하는 도구입니다.  
+실행 인터페이스는 `CLI`와 `WebUI`를 모두 지원합니다.
 
-## 개요
-- 로그인 세션은 `./.chrome-profile` 재사용
-- 회차 링크 수집 후 MPD/License 요청 감지
-- 키 추출 후 `N_m3u8DL-RE`로 다운로드
-- 저장 위치: `./downloads/<작품명>/`
+## 30초 시작
+WebUI만 쓸 경우:
+```powershell
+run_webui.bat
+```
+1. 브라우저 자동 오픈
+2. `세션 확보` 클릭
+3. 로그인/프로필 선택
+4. 작품 ID 입력 후 `다운로드 시작`
 
-## 실행 환경
-- Windows 10/11
-- Python 3.13.x
+CLI만 쓸 경우:
+```powershell
+run_cli.bat --anime-id 16074
+```
+특정 회차만:
+```powershell
+run_cli.bat --anime-id 16074 --episodes "1-3,5"
+```
+
+## 핵심 특징
+- 로그인 세션을 `./.chrome-profile`에 유지해 재사용
+- 작품 제목 기반 저장 경로 자동 생성
+- 회차 선택 다운로드(`--episodes "1-3,5,7"`)
+- 실패 회차 재시도 로직
+- WebUI 실시간 상태/로그(SSE)
+- WebUI 전용 500MB 분할압축 + 진행률 표시 + 완료 후 원본 폴더 삭제 확인
+
+## 디렉터리 구조
+- `main.py`: CLI 진입점
+- `webui_server.py`: WebUI 백엔드(FastAPI)
+- `webui_index.html`: WebUI 프론트엔드
+- `engine.py`: 세션/다운로드 파사드
+- `browser_session.py`: 브라우저/세션 확보 로직
+- `download_job.py`: 회차 수집/다운로드 실행 로직
+- `drm_support.py`: DRM 관련 지원 로직
+- `runtime_support.py`: 공통 유틸/환경 점검
+- `webui_archive.py`: WebUI 압축 전용 로직
+- `webui_state.py`: WebUI 런타임 상태/로그 상태 저장
+
+## 요구 환경
+- OS: Windows 10/11
+- Python: 3.13.x
 - Google Chrome 설치
 
-## 필수 파일/도구
+## 설치(권장 순서)
+```powershell
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+## 필수 파일 및 외부 도구
 - `license/device.wvd`
 - `binaries/N_m3u8DL-RE.exe`
 - `binaries/mkvmerge.exe`
 - `binaries/mp4decrypt.exe`
-- `7z` 또는 `7za` (WebUI 분할압축 기능 사용 시, 한글 경로는 `7z.exe + 7z.dll` 권장)
-- `yt-dlp` (권장: `pip install -r requirements.txt`로 설치)
+- `yt-dlp` (venv 설치 권장)
+- 압축 기능 사용 시 `7z.exe` 또는 `7za.exe`
 
-## 설치
+권장 설치:
 ```powershell
 .\.venv\Scripts\activate
 pip install -r requirements.txt
 ```
+
+## 빠른 실행
+파이썬 명령 대신 배치 파일로 바로 실행할 수 있습니다.
+
+- WebUI: `run_webui.bat`
+- CLI: `run_cli.bat --anime-id 16074 --episodes "1-3,5,7"`
+
+## 실행 전 점검
+1. `license/device.wvd` 존재 확인
+2. `binaries/`에 `N_m3u8DL-RE.exe`, `mkvmerge.exe`, `mp4decrypt.exe` 존재 확인
+3. Chrome 최신 상태 확인
+4. 처음 실행이면 `.chrome-profile` 자동 생성됨
 
 ## CLI 사용법
 기본 실행:
@@ -33,59 +86,176 @@ pip install -r requirements.txt
 python main.py --anime-id 42947
 ```
 
-특정 회차만 실행:
+특정 회차 실행:
 ```powershell
 python main.py --anime-id 42947 --episodes "1-3,5,7"
 ```
 
-### CLI 인자
+### 인자
 | 인자 | 설명 | 예시 |
 |---|---|---|
 | `--anime-id` | 라프텔 작품 ID | `--anime-id 42947` |
 | `--episodes` | 회차 선택 문자열(선택) | `--episodes "1-3,5,7"` |
 
-### `--episodes` 형식
-- 단일 회차: `4`
+### 회차 선택 문법
+- 단일: `3`
 - 범위: `1-6`
 - 혼합: `1-3,5,8-10`
-- 공백은 자동 정리됨
-- 잘못된 형식이면 시작 전에 즉시 오류로 종료됨
+- 잘못된 형식은 실행 초기에 즉시 오류 처리
+
+CLI 도움말:
+```powershell
+python main.py --help
+```
 
 ## WebUI 사용법
-서버 실행:
+실행:
 ```powershell
 python webui_server.py
 ```
+또는:
+```powershell
+run_webui.bat
+```
 
 접속:
-- 브라우저에서 `http://127.0.0.1:8000`
+- `http://127.0.0.1:8000`
+- 서버 실행 시 브라우저 자동 오픈(환경변수 `LAFTEL_WEBUI_NO_AUTO_OPEN=1`로 비활성화 가능)
 
-순서:
+기본 순서:
 1. `세션 확보` 클릭
-2. 로그인 필요 시 `로그인 창`으로 로그인/프로필 선택
-3. 작품 ID 입력
-4. 필요 시 회차 범위 입력 (`1-3,5,7`)
-5. `다운로드 시작` 클릭
-6. 필요 시 `분할압축 (WebUI 전용)`에서 폴더 선택 후 `500MB 분할압축 시작`
-7. 하단 로그/상태 확인
+2. 로그인 필요 시 확인창에서 `예` 선택
+3. 로그인 창에서 로그인 + 프로필 선택 완료
+4. 작품 ID/회차 입력 후 `다운로드 시작`
+5. 필요 시 `분할압축` 섹션에서 500MB 분할압축 실행
+6. 압축 완료 후 원본 폴더 삭제 여부 확인
 
-### WebUI 분할압축
+### WebUI 빠른 체크리스트
+1. `세션 확보` 버튼이 반짝이면 아직 세션 미준비 상태
+2. 세션 준비 완료(`세션 준비됨`)가 되면 `다운로드 시작` 활성화
+3. 기본 로그에서 `회차 시작/완료/실패/건너뜀` 흐름 확인
+4. 필요 시 `고급 사용자용 로그 표시`로 상세 네트워크 로그 확인
+
+### WebUI 단축 가이드
+- 압축 폴더 바로 열기: `압축 폴더 열기`
+- 상태가 꼬였을 때: `프로그램 종료` 후 `run_webui.bat` 재실행
+- 로그가 안 바뀌면: `Ctrl+F5` 강력 새로고침
+
+## WebUI 동작 상세
+### 세션/로그인
+- 저장된 프로필이 없으면 불필요한 세션 검사 스킵
+- 로그인 창은 화면 안쪽 좌표로 강제 배치
+- 로그인 대기 중 `프로필 선택` 단계가 끝날 때까지 자동 페이지 점프 방지
+- 로그인/플레이어 접근 중 캡차 감지 시 안전 중단 및 안내 로그
+
+### 다운로드 UX
+- 세션 준비 전 `다운로드 시작` 버튼 비활성화
+- 세션 미준비 상태에서 `세션 확보` CTA 강조 애니메이션
+- 기본 로그/고급 로그 토글 분리
+- 기본 로그에 중복 스킵(`회차 건너뜀`) 표시
+- 기존 세션 유효 시 재생성 없이 재사용(불필요한 크롬 재실행 감소)
+
+### 분할압축(WebUI 전용)
 - 입력: `./downloads/<작품명>/`
 - 출력: `./archives/<작품명>.7z.001`, `.002`, ...
-- 분할 크기: `500MB` 고정
-- 다운로드 실행 중에는 분할압축 시작 불가
+- 분할 크기: 500MB 고정
+- 압축 진행률 퍼센트 표시
+- 압축 완료 후 원본 폴더 삭제 확인창 제공
+- 폴더 목록 조회는 `no-store`로 캐시 방지
 
-## 동작 메모
-- 세션 확인이 되면 가능하면 헤드리스로 진행합니다.
-- 헤드리스에서 라이선스 감지가 실패하면 창 모드 세션으로 자동 재시도합니다.
-- 강제 종료 잔여물은 다음 실행 시 자동 정리 로직이 동작합니다.
+## API 요약 (WebUI 백엔드)
+- `POST /api/session/ensure`: 기존 세션 점검
+- `POST /api/session/login`: 로그인 창 기반 세션 확보
+- `POST /api/session/close`: 세션 종료
+- `POST /api/download/start`: 다운로드 시작
+- `POST /api/download/stop`: 다운로드 중단 요청
+- `GET /api/status`: 현재 상태 스냅샷
+- `GET /api/logs?limit=200`: 로그 조회
+- `GET /api/stream?limit=200`: SSE 실시간 상태/로그
+- `GET /api/archive/list`: 압축 대상 폴더 목록
+- `POST /api/archive/start`: 500MB 분할압축 시작
+- `GET /api/archive/source-info?anime_title=...`: 원본 폴더 크기/파일 수 조회
+- `POST /api/archive/delete-source`: 원본 폴더 삭제
+- `POST /api/archive/open`: `./archives` 폴더 열기
+- `POST /api/system/shutdown`: 서버 종료
 
-## 자주 보는 로그
-- `외부 도구 점검 PATH 헤드`: 실행 도구 탐색 시작
-- `MPD 요청 감지`: 스트림 메타데이터 요청 확인됨
-- `라이선스 요청 감지`: 키 추출 가능한 요청 확인됨
-- `headless에서 라이선스 요청 감지에 실패`: 자동 fallback 경고(즉시 재시도 경로)
+## 운영 팁
+- 게임/전체화면 사용 중이면 세션 확보/로그인은 먼저 끝내고 다운로드 시작 권장
+- 중복 다운로드는 자동 스킵되며 기본 로그에 `회차 건너뜀`으로 표시
+- 회차별 실패가 생기면 재시도 패스가 자동 수행됨
+- 캡차 감지 시 자동 중단 후 수동 확인을 요구함
+
+## 최근 주요 변경점(패치노트)
+- 회차 수집 fallback 반환 타입 오류 수정 (`EpisodeEntry` 정합성 보장)
+- 제목 후미 `ㅣ 라프텔`/`| 라프텔` 자동 제거
+- WebUI 상태 새로고침 버튼을 고급 로그 컨텍스트로 제한
+- 로그인/종료 확인을 브라우저 기본 confirm에서 커스텀 모달로 전환
+- 로그인 중 종료 시 로그인 창도 함께 정리되도록 상태 연결 보강
+- offscreen 세션 생성 시 최소화 시작 옵션 추가(`--start-minimized`)
+- 압축 진행률 파싱 개선(`-bsp1` + CR/LF 처리)
+- 압축 완료 후 원본 삭제 API 추가(`POST /api/archive/delete-source`)
+- 압축 확인창에 원본 폴더 크기/파일 개수 표시
+- WebUI 실행 편의 배치 파일 추가(`run_webui.bat`, `run_cli.bat`)
+
+## 트러블슈팅
+- 변경이 화면에 반영되지 않을 때
+1. 서버 재시작
+2. 브라우저 `Ctrl+F5` 강력 새로고침
+
+- `로그인이 필요합니다`가 반복될 때
+1. WebUI `세션 확보` 재시도
+2. 로그인 창에서 프로필 선택까지 완료
+3. 캡차 표시 시 수동 완료 후 재실행
+
+- 압축 퍼센트가 안 올라갈 때
+1. `7z`/`7za` 정상 설치 확인
+2. 최신 코드 반영 후 서버 재시작
+3. 고급 로그에서 `[압축]` 출력 확인
+
+- 로그인 창에서 프로필 선택 전에 애니 페이지로 튀는 것 같을 때
+1. 최신 코드 기준으로는 프로필 선택 단계에서 강제 이동하지 않음
+2. 구버전 캐시 가능성 있으니 서버 재시작 + `Ctrl+F5`
+
+- 종료 버튼을 눌렀는데 브라우저가 남을 때
+1. 로그인 대기 창 포함해서 종료하도록 보강됨
+2. 여전히 남으면 `세션 종료` 후 `프로그램 종료` 순서로 실행
+
+## 로그 예시
+성공 흐름:
+```text
+[INFO] 회차 시작: 1화
+[INFO] MPD 요청 감지
+[INFO] 라이선스 요청 감지
+[INFO] 회차 완료: 1화
+```
+
+중복 파일 스킵:
+```text
+[INFO] 회차 건너뜀: 2화 (이미 존재)
+```
+
+캡차 감지:
+```text
+[INFO] 오류: 플레이어 접근 중 캡차/봇 확인 페이지가 감지되었습니다.
+```
+
+압축 완료 + 원본 삭제:
+```text
+[INFO] 분할압축 완료: <작품명> | parts=...
+[INFO] 원본 폴더 삭제 완료: <작품명>
+```
+
+## 초기화/클린업 가이드
+초기 사용자 상태로 테스트하려면:
+- 삭제 권장: `.chrome-profile`, `.runtime`
+- 선택 삭제: `downloads`, `archives`
+- 삭제 금지(필수): `license/device.wvd`
+
+## 알려진 한계
+- Windows/ChromeDriver 특성상 포커스 개입을 100% 제거할 수는 없음
+- 사이트 측 정책/트래픽/캡차에 따라 세션 확보가 간헐적으로 지연될 수 있음
+- `mkv`는 이미 압축된 포맷이라 7z 고효율 옵션에서도 용량 절감이 제한적일 수 있음
 
 ## 주의
-- 개인 학습/연구 용도로만 사용하세요.
-- 관련 서비스 약관/저작권 정책을 확인하고 사용하세요.
+- 개인 학습/연구 목적 범위에서 사용하세요.
+- 서비스 약관/저작권 정책을 확인하고 준수하세요.

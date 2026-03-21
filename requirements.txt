@@ -1,5 +1,6 @@
 selenium>=4.15.0
 webdriver-manager>=4.0.1
+setuptools<81
 
 pywidevine>=1.8.0
 pycryptodomex>=3.19.0

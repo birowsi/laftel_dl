@@ -56,7 +56,19 @@ DOWNLOAD_MARKER_FILE = Path("./.runtime/inprogress_download.json")
 
 def build_process_env():
     env = os.environ.copy()
-    env["PATH"] = str(BINARY_DIR) + os.pathsep + env.get("PATH", "")
+    path_entries = [str(BINARY_DIR)]
+
+    # run_webui.bat처럼 venv python.exe를 직접 호출하면 Scripts가 PATH에 안 잡힐 수 있다.
+    project_venv_scripts = Path("./.venv/Scripts").resolve()
+    if project_venv_scripts.exists():
+        path_entries.append(str(project_venv_scripts))
+
+    exe_dir = Path(sys.executable).resolve().parent
+    if exe_dir.exists():
+        path_entries.append(str(exe_dir))
+
+    existing = env.get("PATH", "")
+    env["PATH"] = os.pathsep.join(path_entries + ([existing] if existing else []))
     return env
 
 
@@ -250,3 +262,10 @@ def check_external_tools():
 
 def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "", name)
+
+
+def normalize_anime_title(name: str) -> str:
+    title = (name or "").strip()
+    # 라프텔 페이지 제목 꼬리표 제거: "... ㅣ 라프텔", "... | 라프텔"
+    title = re.sub(r"\s*[ㅣ|]\s*라프텔\s*$", "", title, flags=re.IGNORECASE)
+    return title.strip()

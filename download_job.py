@@ -1,10 +1,11 @@
 # FILE: download_job.py
-# AI_NOTE: Download executor class with optional event hooks and episode-range filtering. Resolves episodes, captures DRM/network data, auto-recovers broken webdriver sessions, and runs retry logic with fast headless fallback.
+# AI_NOTE: Download executor class with optional event hooks and episode-range filtering. Resolves episodes, captures DRM/network data, auto-recovers broken webdriver sessions, and runs retry logic on offscreen-visible browser sessions.
 import os
 import re
 import subprocess
 import time
 import json
+import locale
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,11 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-from browser_session import is_target_player_link, login_and_select_profile_wire
+from browser_session import (
+    is_captcha_challenge_visible,
+    is_target_player_link,
+    login_and_select_profile_wire,
+)
 from drm_support import get_key_original, get_pssh_from_init
 from runtime_support import (
     N_M3U8DL_RE_EXE,
@@ -29,6 +34,7 @@ from runtime_support import (
     _write_download_marker,
     build_process_env,
     log_print as print,
+    normalize_anime_title,
     safe_quit_driver,
     sanitize_filename,
 )
@@ -50,12 +56,19 @@ class NetworkCaptureState:
     request_url_by_id: dict[str, str] = field(default_factory=dict)
 
 
+@dataclass
+class EpisodeEntry:
+    href: str
+    episode_num: int | None = None
+    label: str = ""
+    order_num: int = 0
+
+
 class DownloadJob:
     LINK_POLL_INTERVAL_SEC = 0.5
     NETWORK_POLL_INTERVAL_SEC = 0.2
     LICENSE_PROBE_LOG_INTERVAL_SEC = 5
     PLAYER_TRIGGER_SCRIPT_TIMEOUT_SEC = 5
-    HEADLESS_FIRST_WAIT_SEC = 12
 
     def __init__(
         self,
@@ -73,6 +86,7 @@ class DownloadJob:
         self.on_event = on_event
         self.episode_selection = episode_selection
         self.download_dir_base = Path("./downloads")
+        self._captcha_detected = False
 
     def _stopped(self):
         return bool(self.should_stop and self.should_stop())
@@ -85,20 +99,6 @@ class DownloadJob:
         except Exception:
             # 이벤트 훅 오류가 다운로드 본 흐름을 깨지 않도록 격리한다.
             pass
-
-    def _is_headless_driver(self):
-        try:
-            caps = getattr(self.driver, "capabilities", {}) or {}
-            args = ((caps.get("goog:chromeOptions") or {}).get("args") or [])
-            if any("headless" in str(arg).lower() for arg in args):
-                return True
-        except Exception:
-            pass
-        try:
-            ua = self.driver.execute_script("return navigator.userAgent || ''")
-            return "headlesschrome" in str(ua).lower()
-        except Exception:
-            return False
 
     @staticmethod
     def _is_driver_disconnected_exception(exc: Exception) -> bool:
@@ -173,19 +173,41 @@ class DownloadJob:
 
         return selected if selected else None
 
-    def _collect_player_links_with_wait(self, selectors, timeout=20, min_count=1):
+    @staticmethod
+    def _extract_episode_number_from_text(text: str) -> int | None:
+        match = re.search(r"(\d+)\s*화", text or "")
+        if match:
+            return int(match.group(1))
+        return None
+
+    def _collect_player_entries_with_wait(self, selectors, timeout=20, min_count=1):
         deadline = time.time() + timeout
         found = []
         while time.time() < deadline:
-            links = []
+            entries = []
             for selector in selectors:
                 for element in self.driver.find_elements(By.CSS_SELECTOR, selector):
                     href = element.get_attribute("href")
-                    if is_target_player_link(href, self.anime_id) and href not in links:
-                        links.append(href)
-            if len(links) >= min_count:
-                return links
-            found = links
+                    if not is_target_player_link(href, self.anime_id):
+                        continue
+                    label = (
+                        element.text
+                        or element.get_attribute("title")
+                        or element.get_attribute("aria-label")
+                        or ""
+                    ).strip()
+                    if href not in [item.href for item in entries]:
+                        entries.append(
+                            EpisodeEntry(
+                                href=href,
+                                label=label,
+                                episode_num=self._extract_episode_number_from_text(label),
+                                order_num=len(entries) + 1,
+                            )
+                        )
+            if len(entries) >= min_count:
+                return entries
+            found = entries
             time.sleep(self.LINK_POLL_INTERVAL_SEC)
         return found
 
@@ -221,19 +243,27 @@ class DownloadJob:
             if not anime_title:
                 raise RuntimeError("제목 요소를 찾지 못했습니다.")
 
-            sanitized_title = sanitize_filename(anime_title)
+            normalized_title = normalize_anime_title(anime_title)
+            sanitized_title = sanitize_filename(normalized_title)
+            if not sanitized_title:
+                sanitized_title = sanitize_filename(anime_title)
             print(f"애니메이션 제목 '{sanitized_title}' 확인")
 
-            links = self._collect_player_links_with_wait(
+            entries = self._collect_player_entries_with_wait(
                 selectors=["#item-tab-view a[href*='/player/']", "a[href*='/player/']"],
                 timeout=20,
                 min_count=2,
             )
+            numbered_entries = [item for item in entries if item.episode_num is not None]
+            if len(numbered_entries) == len(entries) and numbered_entries:
+                numbered_entries.sort(key=lambda item: item.episode_num)
+                entries = numbered_entries
+            links = [item.href for item in entries]
 
             if len(links) > 1:
                 print("item 페이지에서 에피소드 목록 로드 확인")
                 print(f"총 {len(links)}개의 에피소드 링크 확보")
-                return links, sanitized_title
+                return entries, sanitized_title
 
             first_episode_element = None
             episode_link_candidates = [
@@ -258,20 +288,36 @@ class DownloadJob:
             wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#root-video-fullscreen")))
             print("비디오 플레이어 로드 확인")
 
-            links = self._collect_player_links_with_wait(
+            entries = self._collect_player_entries_with_wait(
                 selectors=["aside a[href*='/player/']", "a[href*='/player/']"],
                 timeout=25,
                 min_count=2,
             )
+            numbered_entries = [item for item in entries if item.episode_num is not None]
+            if len(numbered_entries) == len(entries) and numbered_entries:
+                numbered_entries.sort(key=lambda item: item.episode_num)
+                entries = numbered_entries
+            links = [item.href for item in entries]
 
             if not links:
                 for match in re.findall(r"https://laftel\.net/player/\d+/\d+", self.driver.page_source):
                     if is_target_player_link(match, self.anime_id) and match not in links:
                         links.append(match)
+                if links:
+                    # Fallback으로 링크를 찾은 경우에도 반환 타입을 EpisodeEntry로 맞춘다.
+                    entries = [
+                        EpisodeEntry(
+                            href=href,
+                            episode_num=None,
+                            label="",
+                            order_num=index + 1,
+                        )
+                        for index, href in enumerate(links)
+                    ]
 
             print("에피소드 목록 로드 확인")
             print(f"총 {len(links)}개의 에피소드 링크 확보")
-            return links, sanitized_title
+            return entries, sanitized_title
         except Exception as e:
             print(f"오류: 에피소드 링크/제목 추출 중: {type(e).__name__}: {e}")
             try:
@@ -496,6 +542,10 @@ class DownloadJob:
                     pass
                 self.driver.get(episode_url)
                 time.sleep(1)
+                if is_captcha_challenge_visible(self.driver):
+                    self._captcha_detected = True
+                    print("오류: 플레이어 접근 중 캡차/봇 확인 페이지가 감지되었습니다. 캡차를 완료한 뒤 다시 시도해 주세요.")
+                    return None, None, None
                 self._install_request_probe()
 
                 state = NetworkCaptureState()
@@ -519,6 +569,10 @@ class DownloadJob:
                 next_probe_log_at = 0.0
                 last_probe_urls = []
                 while time.time() < lic_deadline:
+                    if is_captcha_challenge_visible(self.driver):
+                        self._captcha_detected = True
+                        print("오류: 라이선스 감시 중 캡차/봇 확인 페이지가 감지되었습니다.")
+                        return None, None, None
                     lic_url, lic_headers, probe_count, probe_urls = self._collect_license_from_probe()
                     if probe_urls:
                         last_probe_urls = probe_urls
@@ -545,9 +599,8 @@ class DownloadJob:
                 )
             except Exception as e:
                 attempt += 1
-                # headless 1차 탐지는 실패해도 즉시 창 모드 재시도로 이어지는 비치명 경로다.
                 if soft_fail and isinstance(e, TimeoutError):
-                    print("경고: headless에서 라이선스 요청 감지에 실패했습니다. 창 모드 재시도로 전환합니다.")
+                    print("경고: 1차 라이선스 요청 감지에 실패했습니다. 즉시 재시도합니다.")
                 else:
                     print(f"경고: 네트워크 요청 처리 중: {e}")
                 if attempt <= retries:
@@ -556,7 +609,66 @@ class DownloadJob:
                 else:
                     return None, None, None
 
-    def download_episode(self, link, episode_num, anime_title, download_dir):
+    def _retry_wait_seconds(self, retry_pass: int, prior_reason: str | None) -> int:
+        base_wait = REQUEST_TIMEOUT_SEC
+        if retry_pass <= 0:
+            return base_wait
+        if prior_reason == "network_data_missing":
+            return REQUEST_TIMEOUT_SEC + min(retry_pass * 15, 30)
+        return base_wait
+
+    def _run_downloader_with_progress(self, command, env, episode_num: int):
+        encoding = locale.getpreferredencoding(False) or "utf-8"
+        progress_re = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
+        last_ui_percent = 75
+
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding=encoding,
+            errors="replace",
+            env=env,
+        )
+        try:
+            while True:
+                line = process.stdout.readline() if process.stdout else ""
+                if not line:
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                    continue
+
+                stripped = line.strip()
+                if not stripped:
+                    continue
+
+                matches = [float(m.group(1)) for m in progress_re.finditer(stripped)]
+                if not matches:
+                    continue
+
+                raw_percent = max(0.0, min(max(matches), 100.0))
+                # 다운로드 단계 바는 75~99를 사용해 "실제 다운로드 중" 체감을 높인다.
+                mapped_percent = 75 + int(raw_percent * 0.24)
+                mapped_percent = max(75, min(mapped_percent, 99))
+                if mapped_percent > last_ui_percent:
+                    last_ui_percent = mapped_percent
+                    self._emit(
+                        "episode_stage",
+                        episode_num=episode_num,
+                        stage="download",
+                        percent=last_ui_percent,
+                    )
+
+            return_code = process.wait()
+            if return_code != 0:
+                raise subprocess.CalledProcessError(returncode=return_code, cmd=command)
+        finally:
+            if process.stdout:
+                process.stdout.close()
+
+    def download_episode(self, link, episode_num, anime_title, download_dir, retry_pass=0, prior_reason=None):
         save_name = f"{anime_title} {episode_num}화"
         expected_filepath = download_dir / f"{save_name}.mkv"
         if expected_filepath.exists():
@@ -590,23 +702,20 @@ class DownloadJob:
         time.sleep(1)
 
         # first try: 빠르게 1회 탐지하고 실패하면 즉시 모드 전환 판단
-        is_headless = self._is_headless_driver()
-        initial_wait_sec = self.HEADLESS_FIRST_WAIT_SEC if is_headless else REQUEST_TIMEOUT_SEC
+        initial_wait_sec = self._retry_wait_seconds(retry_pass, prior_reason)
+        network_retries = 1
+        if retry_pass > 0 and prior_reason == "network_data_missing":
+            print(
+                f"재시도 보강 적용: {episode_num}화 | retry_pass={retry_pass} | "
+                f"wait={initial_wait_sec}s | probe_retries={network_retries}"
+            )
+        self._emit("episode_stage", episode_num=episode_num, stage="network", percent=15)
         mpd_url, lic_url, lic_headers = self.get_network_data(
             link,
-            retries=0,
+            retries=network_retries,
             wait_sec=initial_wait_sec,
-            soft_fail=is_headless,
+            soft_fail=False,
         )
-
-        # headless 환경에서 라이선스 요청이 올라오지 않는 경우가 있어, 즉시 창 모드로 1회 전환 재시도
-        if not all([mpd_url, lic_url, lic_headers]) and is_headless:
-            print("안내: headless에서 라이선스 요청 감지 실패. 창 모드 세션으로 즉시 전환해 1회 재시도합니다.")
-            self._emit("driver_mode_fallback", episode_num=episode_num, from_mode="headless", to_mode="visible")
-            safe_quit_driver(self.driver)
-            self.driver = login_and_select_profile_wire(anime_id=self.anime_id, offscreen=True)
-            if self.driver:
-                mpd_url, lic_url, lic_headers = self.get_network_data(link, retries=0)
 
         if not all([mpd_url, lic_url, lic_headers]):
             print(f"오류: {episode_num}화 네트워크 정보 확보 실패")
@@ -621,12 +730,14 @@ class DownloadJob:
         try:
             env = build_process_env()
             print(f"실행 PATH 헤드: {env['PATH'].split(os.pathsep)[0]}")
+            self._emit("episode_stage", episode_num=episode_num, stage="pssh", percent=35)
             pssh = get_pssh_from_init(mpd_url, lic_headers)
             if not pssh:
                 print(f"오류: {episode_num}화 PSSH 확보 실패")
                 self._emit("episode_error", episode_num=episode_num, reason="pssh_missing", retriable=True)
                 return EpisodeResult(success=False, reason="pssh_missing", retriable=True)
 
+            self._emit("episode_stage", episode_num=episode_num, stage="keys", percent=55)
             keys = get_key_original(pssh, lic_url, lic_headers)
             if not keys:
                 print(f"오류: {episode_num}화 키 추출 실패")
@@ -661,7 +772,8 @@ class DownloadJob:
             ] + key_args
 
             print(f"다운로드 시작: {save_name}.mkv")
-            subprocess.run(command, check=True, env=env)
+            self._emit("episode_stage", episode_num=episode_num, stage="download", percent=75)
+            self._run_downloader_with_progress(command, env, episode_num=episode_num)
             _clear_download_marker()
             print(f"{save_name}.mkv 다운로드 완료")
             downloaded_size = expected_filepath.stat().st_size if expected_filepath.exists() else 0
@@ -694,25 +806,31 @@ class DownloadJob:
 
     def run(self):
         self._emit("job_start", anime_id=self.anime_id, max_retries=self.max_retries)
-        episode_links, anime_title = self.get_episode_links_and_title()
+        episode_entries, anime_title = self.get_episode_links_and_title()
         if not anime_title:
             self._emit("job_error", reason="title_missing")
             raise RuntimeError("애니메이션 제목을 가져오지 못해 작업을 중단합니다.")
 
         selected_episodes = self.parse_episode_selection(self.episode_selection)
         if selected_episodes:
-            filtered_links = []
-            for i, link in enumerate(episode_links, start=1):
-                if i in selected_episodes:
-                    filtered_links.append(link)
-            episode_links = filtered_links
+            numbered_entries = [entry for entry in episode_entries if entry.episode_num is not None]
+            if numbered_entries and len(numbered_entries) == len(episode_entries):
+                episode_entries = [entry for entry in episode_entries if entry.episode_num in selected_episodes]
+            else:
+                episode_entries = [entry for entry in episode_entries if entry.order_num in selected_episodes]
             self._emit(
                 "episode_list_filtered",
-                selected_count=len(episode_links),
+                selected_count=len(episode_entries),
                 selection=self.episode_selection,
             )
-            print(f"회차 필터 적용: '{self.episode_selection}' -> {len(episode_links)}개 선택됨")
-            if not episode_links:
+            print(f"회차 필터 적용: '{self.episode_selection}' -> {len(episode_entries)}개 선택됨")
+            print(f"선택된 회차: {', '.join(str(num) for num in sorted(selected_episodes))}")
+            mapped = [
+                f"{entry.episode_num if entry.episode_num is not None else entry.order_num}화->{entry.href.rsplit('/', 1)[-1]}"
+                for entry in episode_entries
+            ]
+            print(f"실제 매핑: {', '.join(mapped) if mapped else '(없음)'}")
+            if not episode_entries:
                 raise RuntimeError("회차 필터 결과가 비어 있습니다. 회차 범위를 확인해 주세요.")
 
         download_dir = self.download_dir_base / anime_title
@@ -722,29 +840,36 @@ class DownloadJob:
         retriable_failures = []
         final_failures = []
 
-        if episode_links:
-            print(f"\n{'=' * 20} 1차 다운로드를 시작합니다 ({len(episode_links)}개) {'=' * 20}")
-            self._emit("episode_list_ready", count=len(episode_links), anime_title=anime_title)
-            for i, link in enumerate(episode_links):
+        if episode_entries:
+            print(f"\n{'=' * 20} 1차 다운로드를 시작합니다 ({len(episode_entries)}개) {'=' * 20}")
+            self._emit("episode_list_ready", count=len(episode_entries), anime_title=anime_title)
+            for i, entry in enumerate(episode_entries):
+                if self._captcha_detected:
+                    print("중단: 캡차/봇 확인 페이지가 감지되어 남은 회차 처리를 중단합니다.")
+                    break
+                display_episode_num = entry.episode_num if entry.episode_num is not None else entry.order_num
                 if self._stopped():
                     print("중단 요청 감지: 현재 작업을 종료합니다.")
-                    self._emit("job_stop_requested", phase="initial_pass", episode_num=i + 1)
+                    self._emit("job_stop_requested", phase="initial_pass", episode_num=display_episode_num)
                     break
-                result = self.download_episode(link, i + 1, anime_title, download_dir)
+                result = self.download_episode(entry.href, display_episode_num, anime_title, download_dir)
                 if result.success:
                     total_downloaded_bytes += result.downloaded_bytes
                 else:
-                    failure_item = {"link": link, "num": i + 1, "reason": result.reason}
+                    failure_item = {"entry": entry, "num": display_episode_num, "reason": result.reason}
                     if result.retriable:
                         retriable_failures.append(failure_item)
                     else:
                         final_failures.append(failure_item)
-                    print(f"회차 실패 분류: {i + 1}화 | reason={result.reason} | retriable={result.retriable}")
+                    print(f"회차 실패 분류: {display_episode_num}화 | reason={result.reason} | retriable={result.retriable}")
         else:
             print("다운로드 가능한 에피소드 링크를 찾지 못했습니다.")
 
         retry_pass = 0
         while retriable_failures and retry_pass < self.max_retries:
+            if self._captcha_detected:
+                print("중단: 캡차/봇 확인 페이지가 감지되어 재시도를 시작하지 않습니다.")
+                break
             if self._stopped():
                 print("중단 요청 감지: 재시도를 시작하지 않습니다.")
                 self._emit("job_stop_requested", phase="retry_wait")
@@ -752,6 +877,10 @@ class DownloadJob:
             retry_pass += 1
             print(f"\n{'=' * 20} 실패한 {len(retriable_failures)}개 항목 재시도 ({retry_pass}/{self.max_retries}) {'=' * 20}")
             self._emit("retry_pass_start", retry_pass=retry_pass, failed_count=len(retriable_failures))
+            print(
+                "재시도 대상: "
+                + ", ".join(f"{episode['num']}화({episode['reason']})" for episode in retriable_failures)
+            )
 
             safe_quit_driver(self.driver)
             self.driver = login_and_select_profile_wire(anime_id=self.anime_id, offscreen=True)
@@ -766,7 +895,14 @@ class DownloadJob:
                     print("중단 요청 감지: 재시도 루프를 종료합니다.")
                     self._emit("job_stop_requested", phase="retry_loop", retry_pass=retry_pass)
                     break
-                result = self.download_episode(episode["link"], episode["num"], anime_title, download_dir)
+                result = self.download_episode(
+                    episode["entry"].href,
+                    episode["num"],
+                    anime_title,
+                    download_dir,
+                    retry_pass=retry_pass,
+                    prior_reason=episode.get("reason"),
+                )
                 if result.success:
                     total_downloaded_bytes += result.downloaded_bytes
                 else:
@@ -784,12 +920,21 @@ class DownloadJob:
                 print(f"재시도 대기: {backoff_sec}초 후 다음 패스를 시작합니다.")
                 time.sleep(backoff_sec)
 
+        if retriable_failures:
+            print(
+                "재시도 종료: 최종 실패 회차 -> "
+                + ", ".join(f"{episode['num']}화({episode['reason']})" for episode in retriable_failures)
+            )
+        if self._captcha_detected:
+            print("안내: 캡차/봇 확인이 감지되었습니다. 로그인 창에서 캡차를 완료한 뒤 다시 실행해 주세요.")
+            self._emit("job_error", reason="captcha_detected")
+
         unresolved_failures = final_failures + retriable_failures
 
         result = {
             "anime_id": self.anime_id,
             "anime_title": anime_title,
-            "episode_count": len(episode_links),
+            "episode_count": len(episode_entries),
             "failed_count": len(unresolved_failures),
             "downloaded_bytes": total_downloaded_bytes,
         }

@@ -2,16 +2,14 @@
 # AI_NOTE: FastAPI backend for WebUI. Manages session APIs, download job lifecycle, SSE status/log streaming, and WebUI-only 500MB split-archive jobs for downloaded folders.
 import asyncio
 import json
-import locale
 import warnings
 import logging
 import os
 import signal
-import shutil
-import subprocess
 import time
-from datetime import datetime
-from threading import Lock, Thread
+import webbrowser
+import shutil
+from threading import Thread
 from typing import Optional
 from pathlib import Path
 
@@ -31,19 +29,29 @@ if os.environ.get("LAFTEL_SUPPRESS_PKG_RESOURCES_WARNING", "0") == "1":
     )
 
 import engine
-from runtime_support import build_process_env
+from webui_archive import (
+    ARCHIVE_DIR,
+    ARCHIVE_SPLIT_SIZE_MB,
+    find_7z_executable,
+    list_downloaded_titles,
+    resolve_download_target,
+    run_archive_job,
+)
+from webui_state import (
+    DEFAULT_LOG_LIMIT,
+    MAX_LOG_LIMIT,
+    WebUILogHandler,
+    append_log,
+    set_session_phase_locked,
+    state,
+    status_payload_locked,
+    touch_state_locked,
+)
 
 
 app = FastAPI(title="laftel web ui backend")
 HTML_TEMPLATE_PATH = Path(__file__).with_name("webui_index.html")
 NOISY_ACCESS_PATHS = ("/api/status", "/api/logs", "/api/stream")
-DOWNLOADS_DIR = Path("./downloads").resolve()
-ARCHIVE_DIR = Path("./archives").resolve()
-MAX_LOG_LINES = 2000
-TRIMMED_LOG_LINES = 1000
-DEFAULT_LOG_LIMIT = 200
-MAX_LOG_LIMIT = 2000
-ARCHIVE_SPLIT_SIZE_MB = 500
 _uvicorn_server: Optional[uvicorn.Server] = None
 
 
@@ -62,6 +70,15 @@ def _configure_access_log_filter():
 _configure_access_log_filter()
 
 
+def _auto_open_webui_browser():
+    # 기본 동작: 서버 실행 시 WebUI 탭 자동 오픈.
+    # 필요 시 환경변수로 비활성화 가능: LAFTEL_WEBUI_NO_AUTO_OPEN=1
+    if os.environ.get("LAFTEL_WEBUI_NO_AUTO_OPEN", "0") == "1":
+        return
+    url = "http://127.0.0.1:8000"
+    Thread(target=lambda: (time.sleep(0.8), webbrowser.open(url)), daemon=True).start()
+
+
 class DownloadRequest(BaseModel):
     anime_id: int = Field(default=engine.DEFAULT_ANIME_ID, ge=1)
     max_retries: int = Field(default=5, ge=0, le=20)
@@ -73,211 +90,27 @@ class ArchiveRequest(BaseModel):
     split_size_mb: int = Field(default=ARCHIVE_SPLIT_SIZE_MB, ge=100, le=4096)
 
 
-class RuntimeState:
-    def __init__(self):
-        # NOTE: 현재 구조는 로컬 단일 사용자/단일 작업 시나리오를 전제로 한 전역 런타임 상태다.
-        self.lock = Lock()
-        self.driver = None
-        self.running = False
-        self.stop_requested = False
-        self.last_result = None
-        self.last_error = None
-        self.worker: Optional[Thread] = None
-        self.logs = []
-        self.progress = {
-            "anime_title": None,
-            "total_episodes": 0,
-            "processed_episodes": 0,
-            "success_episodes": 0,
-            "failed_episodes": 0,
-            "current_episode": None,
-            "last_event": None,
-        }
-        self.episode_state = {}
-        self.archive_running = False
-        self.archive_last_result = None
-        self.archive_last_error = None
-        self.archive_worker: Optional[Thread] = None
-        self.change_seq = 0
+class ArchiveDeleteRequest(BaseModel):
+    anime_title: str = Field(min_length=1, max_length=200)
 
 
-def _append_log(message: str):
-    ts = datetime.now().strftime("%H:%M:%S")
-    line = f"[{ts}] {message.rstrip()}"
-    with state.lock:
-        state.logs.append(line)
-        if len(state.logs) > MAX_LOG_LINES:
-            state.logs = state.logs[-TRIMMED_LOG_LINES:]
-        state.change_seq += 1
-
-
-def _touch_state_locked():
-    state.change_seq += 1
-
-
-def _status_payload_locked():
-    return {
-        "running": state.running,
-        "stop_requested": state.stop_requested,
-        "has_session": state.driver is not None,
-        "last_result": state.last_result,
-        "last_error": state.last_error,
-        "progress": dict(state.progress),
-        "archive": {
-            "running": state.archive_running,
-            "last_result": state.archive_last_result,
-            "last_error": state.archive_last_error,
-        },
-    }
-
-
-class _WebUILogHandler(logging.Handler):
-    def emit(self, record):
-        _append_log(self.format(record))
-
-
-state = RuntimeState()
-
-
-def _list_downloaded_titles():
-    if not DOWNLOADS_DIR.exists():
-        return []
-    return sorted([p.name for p in DOWNLOADS_DIR.iterdir() if p.is_dir()], key=lambda x: x.lower())
-
-
-def _resolve_download_target(anime_title: str) -> Path:
-    name = (anime_title or "").strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="압축 대상 폴더명이 비어 있습니다.")
-    target = (DOWNLOADS_DIR / name).resolve()
-    if DOWNLOADS_DIR != target and DOWNLOADS_DIR not in target.parents:
-        raise HTTPException(status_code=400, detail="유효하지 않은 폴더 경로입니다.")
-    if not target.exists() or not target.is_dir():
-        raise HTTPException(status_code=404, detail="다운로드 폴더를 찾지 못했습니다.")
-    return target
-
-
-def _find_7z_executable() -> str | None:
-    # 우선순위: 프로젝트 로컬 binaries -> PATH
-    for fallback in (
-        Path("./binaries/7z.exe").resolve(),
-        Path("./binaries/7za.exe").resolve(),
-        Path("./binaries/7zr.exe").resolve(),
-        Path("./7z.exe").resolve(),
-    ):
-        if fallback.exists():
-            return str(fallback)
-    env = build_process_env()
-    for candidate in ("7z", "7za", "7zr"):
-        found = shutil.which(candidate, path=env.get("PATH"))
-        if found:
-            return found
-    return None
-
-
-def _cleanup_existing_archive_parts(output_base: Path):
-    for item in output_base.parent.glob(f"{output_base.name}*"):
+def _dir_size_bytes(path: Path) -> tuple[int, int]:
+    total = 0
+    file_count = 0
+    for p in path.rglob("*"):
         try:
-            if item.is_file():
-                item.unlink()
+            if p.is_file():
+                total += p.stat().st_size
+                file_count += 1
         except Exception:
-            pass
+            continue
+    return total, file_count
 
 
-def _run_archive_job(target_dir: Path, split_size_mb: int, seven_zip: str):
-    source_arg = str(target_dir)
-
-    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-    output_base = ARCHIVE_DIR / f"{target_dir.name}.7z"
-    _cleanup_existing_archive_parts(output_base)
-
-    command = [
-        seven_zip,
-        "a",
-        str(output_base),
-        source_arg,
-        "-t7z",
-        "-m0=lzma2",
-        "-mx=9",
-        "-mfb=273",
-        "-ms=on",
-        f"-v{split_size_mb}m",
-        "-aoa",
-        "-bso1",
-        "-bse1",
-    ]
-
-    _append_log(
-        f"분할압축 시작: target={target_dir.name}, split={split_size_mb}MB, output={output_base.name}.001"
-    )
-    _append_log(f"분할압축 도구: {seven_zip}")
-
-    try:
-        proc = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding=locale.getpreferredencoding(False) or "utf-8",
-            errors="replace",
-            env=build_process_env(),
-        )
-        last_line = None
-        error_context_lines = 0
-        if proc.stdout:
-            for line in proc.stdout:
-                stripped = line.strip()
-                if not stripped or stripped == last_line:
-                    continue
-                last_line = stripped
-                lower = stripped.lower()
-                if "system error" in lower or "error" in lower:
-                    error_context_lines = 3
-                if (
-                    "error" in lower
-                    or "warning" in lower
-                    or "creating archive" in lower
-                    or "everything is ok" in lower
-                    or "%" in stripped
-                    or error_context_lines > 0
-                ):
-                    _append_log(f"[압축] {stripped}")
-                if error_context_lines > 0:
-                    error_context_lines -= 1
-        return_code = proc.wait()
-        if return_code != 0:
-            raise RuntimeError(f"7z 비정상 종료 (exit={return_code})")
-
-        parts = sorted([p for p in ARCHIVE_DIR.glob(f"{output_base.name}*") if p.is_file()])
-        total_bytes = sum(p.stat().st_size for p in parts)
-        result = {
-            "anime_title": target_dir.name,
-            "split_size_mb": split_size_mb,
-            "parts": len(parts),
-            "total_bytes": total_bytes,
-            "output_base": str(output_base),
-        }
-        with state.lock:
-            state.archive_last_result = result
-            state.archive_last_error = None
-            _touch_state_locked()
-        _append_log(
-            f"분할압축 완료: {target_dir.name} | parts={len(parts)} | total_bytes={total_bytes}"
-        )
-    except Exception as e:
-        with state.lock:
-            state.archive_last_error = f"{type(e).__name__}: {e}"
-            _touch_state_locked()
-        _append_log(f"분할압축 오류: {type(e).__name__}: {e}")
-    finally:
-        with state.lock:
-            state.archive_running = False
-            state.archive_worker = None
-            _touch_state_locked()
 
 
 def _run_download_job(anime_id: int, max_retries: int, episodes: Optional[str] = None):
-    web_handler = _WebUILogHandler()
+    web_handler = WebUILogHandler()
     web_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S"))
     engine.LOGGER.addHandler(web_handler)
 
@@ -300,12 +133,16 @@ def _run_download_job(anime_id: int, max_retries: int, episodes: Optional[str] =
                 progress["total_episodes"] = int(payload.get("count") or 0)
             elif event == "episode_start":
                 progress["current_episode"] = payload.get("episode_num")
+                progress["current_episode_stage"] = "prepare"
+                progress["current_episode_percent"] = 5
             elif event == "episode_done":
                 episode_num = payload.get("episode_num")
                 if episode_num is not None:
                     state.episode_state[int(episode_num)] = "success"
                 recompute(progress)
                 progress["current_episode"] = None
+                progress["current_episode_stage"] = "done"
+                progress["current_episode_percent"] = 100
             elif event == "episode_error":
                 episode_num = payload.get("episode_num")
                 retriable = bool(payload.get("retriable"))
@@ -313,11 +150,15 @@ def _run_download_job(anime_id: int, max_retries: int, episodes: Optional[str] =
                     state.episode_state[int(episode_num)] = "failed"
                 recompute(progress)
                 progress["current_episode"] = None
+                progress["current_episode_stage"] = "error"
+                progress["current_episode_percent"] = 100
             elif event == "episode_skipped":
                 episode_num = payload.get("episode_num")
                 if episode_num is not None:
                     state.episode_state[int(episode_num)] = "success"
                 recompute(progress)
+                progress["current_episode_stage"] = "skipped"
+                progress["current_episode_percent"] = 100
             elif event == "job_done":
                 progress["anime_title"] = payload.get("anime_title")
                 progress["total_episodes"] = int(payload.get("episode_count") or progress["total_episodes"] or 0)
@@ -327,33 +168,49 @@ def _run_download_job(anime_id: int, max_retries: int, episodes: Optional[str] =
                 progress["success_episodes"] = max(total - failed, 0)
                 progress["processed_episodes"] = min(total, progress["success_episodes"] + progress["failed_episodes"])
                 progress["current_episode"] = None
-            _touch_state_locked()
+                progress["current_episode_stage"] = "done"
+                progress["current_episode_percent"] = 100
+            elif event == "episode_stage":
+                progress["current_episode"] = payload.get("episode_num") or progress.get("current_episode")
+                progress["current_episode_stage"] = payload.get("stage") or progress.get("current_episode_stage")
+                progress["current_episode_percent"] = int(payload.get("percent") or progress.get("current_episode_percent") or 0)
+            elif event == "retry_pass_start":
+                progress["retry_pass"] = int(payload.get("retry_pass") or 0)
+                progress["retry_failed_count"] = int(payload.get("failed_count") or 0)
+            elif event == "job_stop_requested":
+                progress["retry_pass"] = int(payload.get("retry_pass") or progress.get("retry_pass") or 0)
+            touch_state_locked()
 
         if event == "episode_start":
-            _append_log(f"회차 시작: {payload.get('episode_num')}화")
+            append_log(f"회차 시작: {payload.get('episode_num')}화")
         elif event == "episode_done":
-            _append_log(f"회차 완료: {payload.get('episode_num')}화")
+            append_log(f"회차 완료: {payload.get('episode_num')}화")
         elif event == "episode_error":
-            _append_log(f"회차 실패: {payload.get('episode_num')}화 ({payload.get('reason')})")
+            append_log(f"회차 실패: {payload.get('episode_num')}화 ({payload.get('reason')})")
+        elif event == "episode_skipped":
+            append_log(f"회차 건너뜀: {payload.get('episode_num')}화 (이미 존재)")
 
     try:
-        _append_log(f"다운로드 작업 시작: anime_id={anime_id}, max_retries={max_retries}, episodes={episodes or 'ALL'}")
+        append_log(f"다운로드 작업 시작: anime_id={anime_id}, max_retries={max_retries}, episodes={episodes or 'ALL'}")
         with state.lock:
             driver = state.driver
         if not driver:
             raise RuntimeError("로그인 세션이 없습니다. 먼저 세션을 확보하세요.")
 
-        _append_log("다운로드 준비: 헤드리스 전환 시도")
-        headless_driver = engine.recreate_driver_headless(driver, anime_id=anime_id)
-        if not headless_driver:
+        if engine.has_authenticated_player_access(driver, anime_id=anime_id):
+            append_log("다운로드 준비: 기존 백그라운드 세션 재사용")
+        else:
+            append_log("다운로드 준비: 세션 검증 실패로 백그라운드 세션 재생성 시도")
+            runtime_driver = engine.recreate_driver_headless(driver, anime_id=anime_id)
+            if not runtime_driver:
+                with state.lock:
+                    state.driver = None
+                raise RuntimeError("백그라운드 세션 재생성 또는 세션 검증 실패. 다시 세션을 확보하세요.")
             with state.lock:
-                state.driver = None
-            raise RuntimeError("헤드리스 전환 또는 세션 검증 실패. 다시 세션을 확보하세요.")
-        with state.lock:
-            state.driver = headless_driver
-        driver = headless_driver
+                state.driver = runtime_driver
+            driver = runtime_driver
 
-        _append_log("다운로드 엔진 실행 시작")
+        append_log("다운로드 엔진 실행 시작")
         driver, result = engine.run_download_for_anime(
             driver,
             anime_id,
@@ -366,23 +223,23 @@ def _run_download_job(anime_id: int, max_retries: int, episodes: Optional[str] =
             state.driver = driver
             state.last_result = result
             state.last_error = None
-            _touch_state_locked()
-        _append_log(
+            touch_state_locked()
+        append_log(
             f"다운로드 요약: title={result.get('anime_title')} | episodes={result.get('episode_count')} | "
             f"failed={result.get('failed_count')} | bytes={result.get('downloaded_bytes')}"
         )
-        _append_log("다운로드 작업 종료: 성공")
+        append_log("다운로드 작업 종료: 성공")
     except Exception as e:
         with state.lock:
             state.last_error = f"{type(e).__name__}: {e}"
-            _touch_state_locked()
-        _append_log(f"다운로드 작업 오류: {type(e).__name__}: {e}")
+            touch_state_locked()
+        append_log(f"다운로드 작업 오류: {type(e).__name__}: {e}")
     finally:
         engine.LOGGER.removeHandler(web_handler)
         with state.lock:
             state.running = False
             state.stop_requested = False
-            _touch_state_locked()
+            touch_state_locked()
 
 
 def _signal_process_shutdown_later(delay_sec: float = 0.3):
@@ -391,7 +248,7 @@ def _signal_process_shutdown_later(delay_sec: float = 0.3):
         try:
             os.kill(os.getpid(), signal.SIGINT)
         except Exception as e:
-            _append_log(f"경고: 프로세스 종료 시그널 전송 실패: {type(e).__name__}: {e}")
+            append_log(f"경고: 프로세스 종료 시그널 전송 실패: {type(e).__name__}: {e}")
 
     Thread(target=_worker, daemon=True).start()
 
@@ -404,10 +261,42 @@ def _request_graceful_server_shutdown() -> bool:
     return True
 
 
+def _on_archive_success(result: dict):
+    with state.lock:
+        state.archive_last_result = result
+        state.archive_last_error = None
+        state.archive_progress_percent = 100
+        state.archive_progress_detail = "압축 완료"
+        touch_state_locked()
+
+
+def _on_archive_error(message: str):
+    with state.lock:
+        state.archive_last_error = message
+        state.archive_progress_detail = "압축 실패"
+        touch_state_locked()
+
+
+def _on_archive_finished():
+    with state.lock:
+        state.archive_running = False
+        state.archive_worker = None
+        touch_state_locked()
+
+
+def _on_archive_progress(percent: int, detail: str | None = None):
+    with state.lock:
+        if percent > int(state.archive_progress_percent or 0):
+            state.archive_progress_percent = percent
+        if detail:
+            state.archive_progress_detail = detail[:220]
+        touch_state_locked()
+
+
 @app.exception_handler(StarletteHTTPException)
 async def handle_http_exception(request: Request, exc: StarletteHTTPException):
     if 400 <= int(exc.status_code) < 500:
-        _append_log(
+        append_log(
             f"요청 오류: {request.method} {request.url.path} -> {exc.status_code} ({exc.detail})"
         )
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
@@ -415,7 +304,7 @@ async def handle_http_exception(request: Request, exc: StarletteHTTPException):
 
 @app.exception_handler(RequestValidationError)
 async def handle_validation_exception(request: Request, exc: RequestValidationError):
-    _append_log(f"요청 유효성 오류: {request.method} {request.url.path} -> {exc.errors()}")
+    append_log(f"요청 유효성 오류: {request.method} {request.url.path} -> {exc.errors()}")
     return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
 
@@ -435,7 +324,7 @@ async def stream_updates(request: Request, limit: int = DEFAULT_LOG_LIMIT):
                 if state.change_seq != last_seq:
                     last_seq = state.change_seq
                     payload = {
-                        "status": _status_payload_locked(),
+                        "status": status_payload_locked(),
                         "lines": state.logs[-limit:],
                     }
 
@@ -473,35 +362,46 @@ def ensure_session():
         if state.running:
             raise HTTPException(status_code=409, detail="다운로드 실행 중에는 세션 재설정을 할 수 없습니다.")
         existing_driver = state.driver
+        set_session_phase_locked("checking_existing_driver", "기존 세션과 브라우저 상태를 확인하는 중입니다.")
 
     # 이전 비정상 종료 잔여물 정리 (서버 모드에서는 여기서 수행)
     engine.cleanup_stale_download_artifacts()
 
     if existing_driver:
-        _append_log("기존 드라이버 세션 재검증 중...")
+        append_log("기존 드라이버 세션 재검증 중...")
         if engine.ensure_logged_in(existing_driver):
-            _append_log("기존 드라이버 세션 재검증 완료")
+            append_log("기존 드라이버 세션 재검증 완료")
+            with state.lock:
+                set_session_phase_locked("ready", "기존 세션이 유효합니다. 바로 시작할 수 있습니다.")
             return {"ok": True, "message": "기존 드라이버 세션 재검증 완료"}
-        _append_log("기존 드라이버 세션이 유효하지 않아 종료 후 재확인합니다.")
+        append_log("기존 드라이버 세션이 유효하지 않아 종료 후 재확인합니다.")
         engine.safe_quit_driver(existing_driver)
         with state.lock:
             state.driver = None
-            _touch_state_locked()
+            set_session_phase_locked("checking_tools", "유효하지 않은 세션을 정리했고, 다시 점검을 이어갑니다.")
 
-    _append_log("세션 점검 시작: 외부 도구 확인 중...")
+    append_log("세션 점검 시작: 외부 도구 확인 중...")
+    with state.lock:
+        set_session_phase_locked("checking_tools", "외부 도구와 실행 환경을 확인하는 중입니다.")
     if not engine.check_external_tools():
+        with state.lock:
+            set_session_phase_locked("idle", "외부 도구 점검에 실패했습니다.")
         raise HTTPException(status_code=500, detail="외부 도구 점검 실패")
 
-    _append_log("세션 점검: 로그인된 세션(headless) 확인 중...")
+    append_log("세션 점검: 로그인된 백그라운드 세션 확인 중...")
+    with state.lock:
+        set_session_phase_locked("checking_headless_session", "저장된 크롬 프로필에서 백그라운드 세션을 찾는 중입니다.")
     driver = engine.get_headless_driver_if_session_exists()
     if not driver:
-        _append_log("세션 점검 결과: 로그인 필요")
+        append_log("세션 점검 결과: 로그인 필요")
+        with state.lock:
+            set_session_phase_locked("login_required", "로그인된 세션을 찾지 못했습니다. 로그인 창을 열어 주세요.")
         raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
 
-    _append_log("세션 점검 결과: 로그인 세션 확인 완료")
+    append_log("세션 점검 결과: 로그인 세션 확인 완료")
     with state.lock:
         state.driver = driver
-        _touch_state_locked()
+        set_session_phase_locked("ready", "로그인 세션 확인이 끝났습니다. 이제 다운로드를 시작할 수 있습니다.")
     return {"ok": True, "message": "기존 로그인 세션 확인 완료"}
 
 
@@ -512,28 +412,48 @@ def login_session():
             raise HTTPException(status_code=409, detail="다운로드 실행 중에는 로그인 세션을 새로 만들 수 없습니다.")
         if state.driver:
             return {"ok": True, "message": "이미 세션이 있습니다."}
+        set_session_phase_locked("checking_tools", "로그인 전에 외부 도구 상태를 다시 확인합니다.")
 
-    _append_log("로그인 시작: 외부 도구 확인 중...")
+    append_log("로그인 시작: 외부 도구 확인 중...")
     if not engine.check_external_tools():
+        with state.lock:
+            set_session_phase_locked("idle", "외부 도구 점검에 실패했습니다.")
         raise HTTPException(status_code=500, detail="외부 도구 점검 실패")
 
-    _append_log("로그인 창을 여는 중...")
-    visible = engine.login_and_select_profile_wire()
-    if not visible:
-        _append_log("로그인 실패: 세션 확보 실패")
+    append_log("로그인 창을 여는 중...")
+    with state.lock:
+        set_session_phase_locked("opening_login_window", "로그인과 프로필 선택을 위한 브라우저 창을 여는 중입니다.")
+    visible = engine.create_webdriver_with_profile(headless=False, offscreen=False)
+    with state.lock:
+        # 로그인 대기 중에도 종료 API가 이 드라이버를 정리할 수 있도록 상태에 등록한다.
+        state.driver = visible
+        set_session_phase_locked("waiting_for_login", "브라우저에서 로그인과 프로필 선택을 완료해 주세요.")
+    if not engine.ensure_logged_in(visible, precheck_session=False):
+        append_log("로그인 실패: 세션 확보 실패")
+        with state.lock:
+            if state.driver is visible:
+                state.driver = None
+            set_session_phase_locked("idle", "로그인 세션 확보에 실패했습니다.")
+        engine.safe_quit_driver(visible)
         raise HTTPException(status_code=500, detail="로그인 세션 확보 실패")
 
-    _append_log("헤드리스 전환 중...")
-    headless = engine.recreate_driver_headless(visible)
-    if not headless:
-        _append_log("헤드리스 전환 실패")
-        raise HTTPException(status_code=500, detail="헤드리스 전환 실패. 다시 로그인 후 시도해 주세요.")
-
-    _append_log("로그인 완료 및 헤드리스 전환 완료")
+    append_log("백그라운드 세션 전환 중...")
     with state.lock:
-        state.driver = headless
-        _touch_state_locked()
-    return {"ok": True, "message": "로그인 완료 및 헤드리스 전환 완료"}
+        set_session_phase_locked("switching_headless", "로그인된 브라우저 세션을 백그라운드 모드로 전환하는 중입니다.")
+    runtime_driver = engine.recreate_driver_headless(visible)
+    if not runtime_driver:
+        append_log("백그라운드 세션 전환 실패")
+        with state.lock:
+            if state.driver is visible:
+                state.driver = None
+            set_session_phase_locked("idle", "백그라운드 세션 전환에 실패했습니다. 다시 로그인해 주세요.")
+        raise HTTPException(status_code=500, detail="백그라운드 세션 전환 실패. 다시 로그인 후 시도해 주세요.")
+
+    append_log("로그인 완료 및 백그라운드 세션 전환 완료")
+    with state.lock:
+        state.driver = runtime_driver
+        set_session_phase_locked("ready", "세션 확보가 끝났습니다. 이제 다운로드를 시작할 수 있습니다.")
+    return {"ok": True, "message": "로그인 완료 및 백그라운드 세션 전환 완료"}
 
 
 @app.post("/api/download/start")
@@ -566,18 +486,22 @@ def start_download(req: DownloadRequest):
             "success_episodes": 0,
             "failed_episodes": 0,
             "current_episode": None,
+            "current_episode_stage": "idle",
+            "current_episode_percent": 0,
             "last_event": "job_queued",
+            "retry_pass": 0,
+            "retry_failed_count": 0,
         }
         state.episode_state = {}
-        _touch_state_locked()
+        set_session_phase_locked("ready", "다운로드에 사용할 세션이 준비되어 있습니다.")
         state.worker = Thread(
             target=_run_download_job,
             args=(req.anime_id, req.max_retries, req.episodes),
             daemon=True,
         )
         state.worker.start()
-    _append_log(request_log)
-    _append_log("다운로드 작업 스레드 시작")
+    append_log(request_log)
+    append_log("다운로드 작업 스레드 시작")
     return {"ok": True, "message": "다운로드 작업을 시작했습니다."}
 
 
@@ -587,15 +511,15 @@ def stop_download():
         if not state.running:
             return {"ok": True, "message": "실행 중인 다운로드 작업이 없습니다."}
         state.stop_requested = True
-        _touch_state_locked()
-    _append_log("중단 요청 수신")
+        touch_state_locked()
+    append_log("중단 요청 수신")
     return {"ok": True, "message": "중단 요청을 전달했습니다. 현재 작업 단위 완료 후 종료됩니다."}
 
 
 @app.get("/api/status")
 def get_status():
     with state.lock:
-        return _status_payload_locked()
+        return status_payload_locked()
 
 
 @app.get("/api/logs")
@@ -608,10 +532,13 @@ def get_logs(limit: int = DEFAULT_LOG_LIMIT):
 
 @app.get("/api/archive/list")
 def list_archive_targets():
-    titles = _list_downloaded_titles()
+    titles = list_downloaded_titles()
     with state.lock:
         archive_running = state.archive_running
-    return {"titles": titles, "archive_running": archive_running}
+    return JSONResponse(
+        {"titles": titles, "archive_running": archive_running},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
 
 
 @app.post("/api/archive/start")
@@ -622,11 +549,11 @@ def start_archive(req: ArchiveRequest):
             detail=f"현재 WebUI 분할압축은 {ARCHIVE_SPLIT_SIZE_MB}MB 고정입니다.",
         )
 
-    target_dir = _resolve_download_target(req.anime_title)
+    target_dir = resolve_download_target(req.anime_title)
     if not any(target_dir.iterdir()):
         raise HTTPException(status_code=400, detail="선택한 폴더가 비어 있습니다.")
 
-    seven_zip = _find_7z_executable()
+    seven_zip = find_7z_executable()
     if not seven_zip:
         raise HTTPException(status_code=500, detail="7z 실행 파일을 찾지 못했습니다. (7z/7za)")
 
@@ -638,15 +565,26 @@ def start_archive(req: ArchiveRequest):
         state.archive_running = True
         state.archive_last_result = None
         state.archive_last_error = None
+        state.archive_progress_percent = 0
+        state.archive_progress_detail = "압축 준비 중"
         state.archive_worker = Thread(
-            target=_run_archive_job,
-            args=(target_dir, req.split_size_mb, seven_zip),
+            target=run_archive_job,
+            args=(
+                target_dir,
+                req.split_size_mb,
+                seven_zip,
+                append_log,
+                _on_archive_progress,
+                _on_archive_success,
+                _on_archive_error,
+                _on_archive_finished,
+            ),
             daemon=True,
         )
-        _touch_state_locked()
+        touch_state_locked()
         state.archive_worker.start()
 
-    _append_log(
+    append_log(
         f"분할압축 요청 수신: folder={target_dir.name}, split={req.split_size_mb}MB"
     )
     return {
@@ -657,6 +595,53 @@ def start_archive(req: ArchiveRequest):
     }
 
 
+@app.get("/api/archive/source-info")
+def archive_source_info(anime_title: str):
+    target_dir = resolve_download_target(anime_title)
+    size_bytes, file_count = _dir_size_bytes(target_dir)
+    return {
+        "anime_title": target_dir.name,
+        "size_bytes": size_bytes,
+        "file_count": file_count,
+    }
+
+
+@app.post("/api/archive/delete-source")
+def delete_archive_source(req: ArchiveDeleteRequest):
+    target_dir = resolve_download_target(req.anime_title)
+    with state.lock:
+        if state.running:
+            raise HTTPException(status_code=409, detail="다운로드 실행 중에는 원본 폴더를 삭제할 수 없습니다.")
+        if state.archive_running:
+            raise HTTPException(status_code=409, detail="분할압축 실행 중에는 원본 폴더를 삭제할 수 없습니다.")
+    try:
+        shutil.rmtree(target_dir)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"원본 폴더 삭제 실패: {type(e).__name__}: {e}") from e
+    append_log(f"원본 폴더 삭제 완료: {target_dir.name}")
+    return {"ok": True, "message": "원본 폴더를 삭제했습니다.", "anime_title": target_dir.name}
+
+
+@app.post("/api/archive/open")
+def open_archive_folder():
+    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        if os.name == "nt":
+            os.startfile(str(ARCHIVE_DIR))
+        else:
+            import subprocess
+            import shutil
+
+            opener = shutil.which("open") or shutil.which("xdg-open")
+            if not opener:
+                raise RuntimeError("파일 관리자 실행 도구(open/xdg-open)를 찾지 못했습니다.")
+            subprocess.Popen([opener, str(ARCHIVE_DIR)])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"압축 폴더 열기 실패: {type(e).__name__}: {e}") from e
+    append_log(f"압축 폴더 열기: {ARCHIVE_DIR}")
+    return {"ok": True, "message": "압축 폴더를 열었습니다.", "path": str(ARCHIVE_DIR)}
+
+
 @app.post("/api/session/close")
 def close_session():
     with state.lock:
@@ -664,10 +649,10 @@ def close_session():
             raise HTTPException(status_code=409, detail="다운로드 실행 중에는 세션 종료를 할 수 없습니다.")
         driver = state.driver
         state.driver = None
-        _touch_state_locked()
+        set_session_phase_locked("idle", "세션을 종료했습니다. 다시 사용하려면 세션 확보가 필요합니다.")
     if driver:
         engine.safe_quit_driver(driver)
-        _append_log("세션 종료 완료")
+        append_log("세션 종료 완료")
     return {"ok": True, "message": "세션 종료 완료"}
 
 
@@ -680,12 +665,12 @@ def shutdown_system():
             raise HTTPException(status_code=409, detail="분할압축 실행 중에는 프로그램 종료를 할 수 없습니다.")
         driver = state.driver
         state.driver = None
-        _touch_state_locked()
+        touch_state_locked()
     if driver:
         engine.safe_quit_driver(driver)
-    _append_log("종료 요청 수신: 서버 graceful shutdown을 시작합니다.")
+    append_log("종료 요청 수신: 서버 graceful shutdown을 시작합니다.")
     if not _request_graceful_server_shutdown():
-        _append_log("안내: 서버 객체를 찾지 못해 프로세스 SIGINT 종료로 대체합니다.")
+        append_log("안내: 서버 객체를 찾지 못해 프로세스 SIGINT 종료로 대체합니다.")
         _signal_process_shutdown_later()
     return {"ok": True, "message": "프로그램 종료 요청을 처리했습니다. 잠시 후 서버가 종료됩니다."}
 
@@ -693,4 +678,8 @@ def shutdown_system():
 if __name__ == "__main__":
     config = uvicorn.Config(app=app, host="127.0.0.1", port=8000, reload=False)
     _uvicorn_server = uvicorn.Server(config)
-    _uvicorn_server.run()
+    _auto_open_webui_browser()
+    try:
+        _uvicorn_server.run()
+    except KeyboardInterrupt:
+        pass

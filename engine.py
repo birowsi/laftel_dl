@@ -32,7 +32,7 @@ ASCII_ART = r"""
 /_/ /_/\__,_/_/ /_/_.___/_/   
 """
 
-DEFAULT_ANIME_ID = 40846
+DEFAULT_ANIME_ID = 16074
 
 
 def run_download_for_anime(
