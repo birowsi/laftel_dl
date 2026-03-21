@@ -3,6 +3,19 @@
 라프텔 작품 ID 기준으로 회차를 수집하고, 네트워크/DRM 흐름을 확인해 다운로드하는 도구입니다.  
 실행 인터페이스는 `CLI`와 `WebUI`를 모두 지원합니다.
 
+현재 안정 버전: `v1.1.0`
+
+## 준비물(먼저 확인)
+- OS: Windows 10/11
+- Python: 3.13.x
+- Google Chrome 설치
+- `license/device.wvd`
+- `binaries/N_m3u8DL-RE.exe`
+- `binaries/mkvmerge.exe`
+- `binaries/mp4decrypt.exe`
+- `yt-dlp` (venv 설치 권장)
+- 압축 기능 사용 시 `7z.exe` 또는 `7za.exe`
+
 ## 30초 시작
 WebUI만 쓸 경우:
 ```powershell
@@ -42,28 +55,9 @@ run_cli.bat --anime-id 16074 --episodes "1-3,5"
 - `webui_archive.py`: WebUI 압축 전용 로직
 - `webui_state.py`: WebUI 런타임 상태/로그 상태 저장
 
-## 요구 환경
-- OS: Windows 10/11
-- Python: 3.13.x
-- Google Chrome 설치
-
 ## 설치(권장 순서)
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-## 필수 파일 및 외부 도구
-- `license/device.wvd`
-- `binaries/N_m3u8DL-RE.exe`
-- `binaries/mkvmerge.exe`
-- `binaries/mp4decrypt.exe`
-- `yt-dlp` (venv 설치 권장)
-- 압축 기능 사용 시 `7z.exe` 또는 `7za.exe`
-
-권장 설치:
-```powershell
 .\.venv\Scripts\activate
 pip install -r requirements.txt
 ```
@@ -196,6 +190,8 @@ run_webui.bat
 - 압축 완료 후 원본 삭제 API 추가(`POST /api/archive/delete-source`)
 - 압축 확인창에 원본 폴더 크기/파일 개수 표시
 - WebUI 실행 편의 배치 파일 추가(`run_webui.bat`, `run_cli.bat`)
+- 다운로드 완료/오류 시 브라우저 세션 자동 정리
+- 다음 실행 시 루트 임시 회차 폴더 자동 정리 강화
 
 ## 트러블슈팅
 - 변경이 화면에 반영되지 않을 때
