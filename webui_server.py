@@ -113,6 +113,7 @@ def _run_download_job(anime_id: int, max_retries: int, episodes: Optional[str] =
     web_handler = WebUILogHandler()
     web_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S"))
     engine.LOGGER.addHandler(web_handler)
+    driver = None
 
     def on_job_event(payload: dict):
         event = payload.get("event")

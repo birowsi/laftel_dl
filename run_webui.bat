@@ -25,5 +25,5 @@ exit /b 1
 
 :cleanup
 "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -Command "$procs=Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'chrome.exe' -and $_.CommandLine -like '*\.chrome-profile*' }; foreach($p in $procs){ Stop-Process -Id $p.ProcessId -Force }" >nul 2>&1
-pause
+
 endlocal

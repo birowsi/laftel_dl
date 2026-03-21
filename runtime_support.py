@@ -169,6 +169,67 @@ def cleanup_stale_download_artifacts():
     if removed > 0:
         log_print(f"이전 비정상 종료 잔여 파일 정리 완료: {removed}개")
     _clear_download_marker()
+    cleanup_stale_root_episode_dirs()
+
+
+def cleanup_stale_root_episode_dirs():
+    root_dir = Path(".").resolve()
+    protected_dirs = {
+        ".git",
+        ".venv",
+        ".chrome-profile",
+        ".runtime",
+        "__pycache__",
+        "downloads",
+        "archives",
+        "license",
+        "binaries",
+    }
+    temp_exts = {
+        ".tmp",
+        ".part",
+        ".aria2",
+        ".m4s",
+        ".mp4",
+        ".m4a",
+        ".aac",
+        ".hevc",
+        ".h265",
+        ".h264",
+        ".ts",
+    }
+    removed_dirs = 0
+    for entry in root_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        if entry.name in protected_dirs:
+            continue
+        if not re.search(r"\s\d+화$", entry.name):
+            continue
+
+        file_names = []
+        for p in entry.rglob("*"):
+            if p.is_file():
+                file_names.append(p.name.lower())
+
+        if not file_names:
+            shutil.rmtree(entry, ignore_errors=True)
+            removed_dirs += 1
+            continue
+
+        has_final_output = any(name.endswith(".mkv") for name in file_names)
+        has_temp_artifact = any(
+            name.endswith(ext) for name in file_names for ext in temp_exts
+        ) or any(".tmp" in name or "temp" in name for name in file_names)
+
+        if has_final_output:
+            continue
+        if has_temp_artifact:
+            shutil.rmtree(entry, ignore_errors=True)
+            removed_dirs += 1
+
+    if removed_dirs > 0:
+        log_print(f"루트 임시 회차 폴더 정리 완료: {removed_dirs}개")
 
 
 def cleanup_stale_driver_process():
