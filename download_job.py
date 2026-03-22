@@ -941,5 +941,9 @@ class DownloadJob:
             "failed_count": len(unresolved_failures),
             "downloaded_bytes": total_downloaded_bytes,
         }
+        print(
+            f"전체 다운로드 완료: title={anime_title} | episodes={result['episode_count']} | "
+            f"failed={result['failed_count']} | bytes={result['downloaded_bytes']}"
+        )
         self._emit("job_done", **result)
         return self.driver, result

@@ -643,12 +643,14 @@
           <div class="stack">
             <div class="field">
               <label for="animeId">작품 ID</label>
-              <input id="animeId" type="number" value="__DEFAULT_ANIME_ID__" min="1" />
+              <input id="animeId" type="text" value="__DEFAULT_ANIME_ID__" placeholder="예: 16074, 42947, 40846" />
             </div>
             <div class="field">
               <label for="episodes">회차 범위</label>
-              <input id="episodes" type="text" placeholder="전체 다운로드면 비워두기 / 예: 1-3,5,7" />
+              <input id="episodes" type="text" placeholder="전체면 비우기 / 공통: 1-3,5 / 작품별: 16074:1-3;42947:5" />
+              <p class="meta-note">여러 작품 ID와 함께 사용할 때: 공통 회차는 <code>1-3,5</code>, 작품별 회차는 <code>16074:1-3;42947:5,6</code> 형식</p>
             </div>
+            <label class="toggle"><input id="keepSession" type="checkbox" checked /> 다운로드 후 세션 유지 (기본 ON)</label>
           </div>
 
           <div class="button-group">
@@ -668,7 +670,7 @@
     </section>
 
     <main class="main">
-      <section class="section">
+      <section id="logSection" class="section">
         <div class="section__head">
           <h2>실시간 로그</h2>
           <p>기본값은 보기 좋은 로그만 보여줍니다. 필요하면 고급 로그를 열어 전체 네트워크/재시도 흐름까지 볼 수 있습니다.</p>
@@ -778,12 +780,14 @@
 
   <script>
     const out = document.getElementById("out");
+    const logSection = document.getElementById("logSection");
     const liveStream = document.getElementById("liveStream");
     const autoScroll = document.getElementById("autoScroll");
     const advancedLogs = document.getElementById("advancedLogs");
     const archiveTarget = document.getElementById("archiveTarget");
     const animeIdInput = document.getElementById("animeId");
     const episodesInput = document.getElementById("episodes");
+    const keepSessionInput = document.getElementById("keepSession");
     const statusHeadline = document.getElementById("statusHeadline");
     const statusDetail = document.getElementById("statusDetail");
     const statusMeta = document.getElementById("statusMeta");
@@ -848,6 +852,7 @@
         "다운로드 작업 스레드 시작",
         "다운로드 작업 시작",
         "다운로드 요약",
+        "전체 다운로드 완료",
         "다운로드 작업 종료",
         "중단 요청 수신",
         "종료 요청 수신",
@@ -1244,7 +1249,14 @@
     async function startDownload() {
       let dotsTimer = null;
       try {
-        const animeId = Number(animeIdInput.value || "0");
+        if (logSection) {
+          logSection.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+        const animeIds = (animeIdInput.value || "").trim();
+        if (!animeIds) {
+          setOut("다운로드 시작 실패: 작품 ID를 입력해 주세요. (여러 개는 콤마로 구분)");
+          return;
+        }
         const episodes = (episodesInput.value || "").trim();
         let dots = 0;
         setOut("다운로드 시작 요청 전송 중...");
@@ -1259,7 +1271,12 @@
         const data = await api("/api/download/start", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ anime_id: animeId, max_retries: 5, episodes: episodes || null })
+          body: JSON.stringify({
+            anime_ids: animeIds,
+            max_retries: 5,
+            episodes: episodes || null,
+            keep_session: Boolean(keepSessionInput.checked),
+          })
         });
         setOut(data);
         await refreshStatus();

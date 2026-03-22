@@ -80,9 +80,11 @@ def _auto_open_webui_browser():
 
 
 class DownloadRequest(BaseModel):
-    anime_id: int = Field(default=engine.DEFAULT_ANIME_ID, ge=1)
+    anime_id: Optional[int] = Field(default=None, ge=1)
+    anime_ids: Optional[str] = Field(default=None, max_length=1000)
     max_retries: int = Field(default=5, ge=0, le=20)
     episodes: Optional[str] = Field(default=None, max_length=200)
+    keep_session: bool = True
 
 
 class ArchiveRequest(BaseModel):
@@ -109,7 +111,87 @@ def _dir_size_bytes(path: Path) -> tuple[int, int]:
 
 
 
-def _run_download_job(anime_id: int, max_retries: int, episodes: Optional[str] = None):
+def _parse_anime_ids(anime_ids_text: Optional[str], anime_id: Optional[int]) -> list[int]:
+    if anime_ids_text and anime_ids_text.strip():
+        raw = anime_ids_text.strip()
+    elif anime_id is not None:
+        raw = str(anime_id)
+    else:
+        raw = str(engine.DEFAULT_ANIME_ID)
+
+    ids = []
+    seen = set()
+    for token in [t.strip() for t in raw.replace("\n", ",").split(",") if t.strip()]:
+        if not token.isdigit():
+            raise ValueError(f"작품 ID 형식 오류: {token}")
+        value = int(token)
+        if value <= 0:
+            raise ValueError(f"작품 ID는 1 이상이어야 합니다: {token}")
+        if value in seen:
+            continue
+        seen.add(value)
+        ids.append(value)
+    if not ids:
+        raise ValueError("작품 ID가 비어 있습니다.")
+    if len(ids) > 30:
+        raise ValueError("한 번에 최대 30개 작품 ID만 처리할 수 있습니다.")
+    return ids
+
+
+def _build_episode_plan(anime_ids: list[int], episodes: Optional[str]) -> dict[int, Optional[str]]:
+    raw = (episodes or "").strip()
+    if not raw:
+        return {anime_id: None for anime_id in anime_ids}
+
+    # Normalize common full-width punctuation from IME input.
+    normalized = (
+        raw.replace("：", ":")
+        .replace("；", ";")
+        .replace("，", ",")
+        .replace("｜", "|")
+    )
+    raw = normalized
+
+    # Global format: "1-3,5"
+    if ":" not in raw:
+        engine.validate_episode_selection(raw)
+        return {anime_id: raw for anime_id in anime_ids}
+
+    # Per-anime format: "16074:1-3;42947:5,6"
+    plan: dict[int, Optional[str]] = {anime_id: None for anime_id in anime_ids}
+    seen_ids: set[int] = set()
+    allowed_ids = set(anime_ids)
+    token_source = raw.replace("\n", ";").replace("|", ";")
+    tokens = [token.strip() for token in token_source.split(";") if token.strip()]
+    if not tokens:
+        raise ValueError("회차 지정 형식이 비어 있습니다.")
+
+    for token in tokens:
+        if ":" not in token:
+            raise ValueError(f"작품별 회차 형식 오류: '{token}' (예: 16074:1-3)")
+        anime_id_text, episode_text = token.split(":", 1)
+        anime_id_text = anime_id_text.strip()
+        episode_text = episode_text.strip()
+        if not anime_id_text.isdigit():
+            raise ValueError(f"작품 ID 형식 오류: '{anime_id_text}'")
+        target_anime_id = int(anime_id_text)
+        if target_anime_id not in allowed_ids:
+            raise ValueError(f"작품별 회차 지정에 요청되지 않은 ID가 있습니다: {target_anime_id}")
+        if target_anime_id in seen_ids:
+            raise ValueError(f"작품별 회차 지정 중복: {target_anime_id}")
+        engine.validate_episode_selection(episode_text)
+        plan[target_anime_id] = episode_text
+        seen_ids.add(target_anime_id)
+
+    return plan
+
+
+def _run_download_job(
+    anime_ids: list[int],
+    max_retries: int,
+    episode_plan: dict[int, Optional[str]],
+    keep_session: bool = True,
+):
     web_handler = WebUILogHandler()
     web_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S"))
     engine.LOGGER.addHandler(web_handler)
@@ -192,47 +274,86 @@ def _run_download_job(anime_id: int, max_retries: int, episodes: Optional[str] =
             append_log(f"회차 건너뜀: {payload.get('episode_num')}화 (이미 존재)")
 
     try:
-        append_log(f"다운로드 작업 시작: anime_id={anime_id}, max_retries={max_retries}, episodes={episodes or 'ALL'}")
+        append_log(
+            f"다운로드 작업 시작: anime_ids={','.join(str(v) for v in anime_ids)}, "
+            f"max_retries={max_retries}"
+        )
         with state.lock:
             driver = state.driver
         if not driver:
             raise RuntimeError("로그인 세션이 없습니다. 먼저 세션을 확보하세요.")
-
-        if engine.has_authenticated_player_access(driver, anime_id=anime_id):
-            append_log("다운로드 준비: 기존 백그라운드 세션 재사용")
-        else:
-            append_log("다운로드 준비: 세션 검증 실패로 백그라운드 세션 재생성 시도")
-            runtime_driver = engine.recreate_driver_headless(driver, anime_id=anime_id)
-            if not runtime_driver:
+        result = None
+        anime_count = len(anime_ids)
+        for index, anime_id in enumerate(anime_ids, start=1):
+            selected_episodes = episode_plan.get(anime_id)
+            if state.stop_requested:
+                append_log("중단 요청 감지: 남은 작품 처리를 중단합니다.")
+                break
+            append_log(
+                f"작품 시작 ({index}/{anime_count}): anime_id={anime_id}, "
+                f"episodes={selected_episodes or 'ALL'}"
+            )
+            if engine.has_authenticated_player_access(driver, anime_id=anime_id):
+                append_log("다운로드 준비: 기존 백그라운드 세션 재사용")
+            else:
+                append_log("다운로드 준비: 세션 검증 실패로 백그라운드 세션 재생성 시도")
+                runtime_driver = engine.recreate_driver_headless(driver, anime_id=anime_id)
+                if not runtime_driver:
+                    with state.lock:
+                        state.driver = None
+                    raise RuntimeError("백그라운드 세션 재생성 또는 세션 검증 실패. 다시 세션을 확보하세요.")
                 with state.lock:
-                    state.driver = None
-                raise RuntimeError("백그라운드 세션 재생성 또는 세션 검증 실패. 다시 세션을 확보하세요.")
-            with state.lock:
-                state.driver = runtime_driver
-            driver = runtime_driver
+                    state.driver = runtime_driver
+                driver = runtime_driver
 
-        append_log("다운로드 엔진 실행 시작")
-        driver, result = engine.run_download_for_anime(
-            driver,
-            anime_id,
-            max_retries=max_retries,
-            should_stop=lambda: state.stop_requested,
-            on_event=on_job_event,
-            episode_selection=episodes,
-        )
-        with state.lock:
-            state.driver = None
-            state.last_result = result
-            state.last_error = None
-            set_session_phase_locked("idle", "다운로드 종료로 세션을 정리했습니다. 다시 시작하려면 세션 확보를 눌러 주세요.")
-            touch_state_locked()
-        engine.safe_quit_driver(driver)
-        driver = None
+            append_log("다운로드 엔진 실행 시작")
+            driver, result = engine.run_download_for_anime(
+                driver,
+                anime_id,
+                max_retries=max_retries,
+                should_stop=lambda: state.stop_requested,
+                on_event=on_job_event,
+                episode_selection=selected_episodes,
+            )
+            append_log(
+                f"작품 종료 ({index}/{anime_count}): anime_id={anime_id} | "
+                f"failed={result.get('failed_count') if result else 'n/a'}"
+            )
+
+        if result is None:
+            result = {
+                "anime_id": anime_ids[0] if anime_ids else None,
+                "anime_title": None,
+                "episode_count": 0,
+                "failed_count": 0,
+                "downloaded_bytes": 0,
+            }
+
+        if keep_session:
+            with state.lock:
+                state.driver = driver
+                state.last_result = result
+                state.last_error = None
+                set_session_phase_locked("ready", "다운로드가 끝났고 세션을 유지했습니다. 바로 다음 다운로드를 시작할 수 있습니다.")
+                touch_state_locked()
+        else:
+            with state.lock:
+                state.driver = None
+                state.last_result = result
+                state.last_error = None
+                set_session_phase_locked("idle", "다운로드가 끝나 세션을 정리했습니다. 다시 시작하려면 세션을 확보해 주세요.")
+                touch_state_locked()
+            engine.safe_quit_driver(driver)
+            driver = None
+
         append_log(
             f"다운로드 요약: title={result.get('anime_title')} | episodes={result.get('episode_count')} | "
             f"failed={result.get('failed_count')} | bytes={result.get('downloaded_bytes')}"
         )
-        append_log("다운로드 작업 종료: 성공 (브라우저 세션 정리 완료)")
+        append_log(
+            f"전체 다운로드 완료: episodes={result.get('episode_count')} / failed={result.get('failed_count')}"
+        )
+        append_log("다운로드 작업 종료: 성공 (세션 유지)" if keep_session else "다운로드 작업 종료: 성공 (세션 정리)")
     except Exception as e:
         try:
             if driver:
@@ -470,13 +591,22 @@ def login_session():
 @app.post("/api/download/start")
 def start_download(req: DownloadRequest):
     try:
-        engine.validate_episode_selection(req.episodes)
+        anime_ids = _parse_anime_ids(req.anime_ids, req.anime_id)
+        episode_plan = _build_episode_plan(anime_ids, req.episodes)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"회차 입력 형식 오류: {e}") from e
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    if req.episodes and (":" in req.episodes or "：" in req.episodes):
+        plan_log = "; ".join(f"{anime_id}:{episode_plan.get(anime_id) or 'ALL'}" for anime_id in anime_ids)
+        episode_log = f"PER_ANIME({plan_log})"
+    else:
+        first_id = anime_ids[0] if anime_ids else None
+        episode_log = episode_plan.get(first_id) if first_id is not None else None
+        episode_log = episode_log or "ALL"
 
     request_log = (
-        f"다운로드 요청 수신: anime_id={req.anime_id}, max_retries={req.max_retries}, "
-        f"episodes={req.episodes or 'ALL'}"
+        f"다운로드 요청 수신: anime_ids={','.join(str(v) for v in anime_ids)}, max_retries={req.max_retries}, "
+        f"episodes={episode_log}, keep_session={req.keep_session}"
     )
     with state.lock:
         if state.running:
@@ -507,11 +637,15 @@ def start_download(req: DownloadRequest):
         set_session_phase_locked("ready", "다운로드에 사용할 세션이 준비되어 있습니다.")
         state.worker = Thread(
             target=_run_download_job,
-            args=(req.anime_id, req.max_retries, req.episodes),
+            args=(anime_ids, req.max_retries, episode_plan, req.keep_session),
             daemon=True,
         )
         state.worker.start()
     append_log(request_log)
+    append_log(
+        "다운로드 계획: "
+        + " | ".join(f"{anime_id}->{episode_plan.get(anime_id) or 'ALL'}" for anime_id in anime_ids)
+    )
     append_log("다운로드 작업 스레드 시작")
     return {"ok": True, "message": "다운로드 작업을 시작했습니다."}
 
