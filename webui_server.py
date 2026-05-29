@@ -374,13 +374,13 @@ def _run_download_job(
             touch_state_locked()
 
 
-def _signal_process_shutdown_later(delay_sec: float = 0.3):
+def _signal_process_shutdown_later(delay_sec: float = 0.5):
     def _worker():
         time.sleep(delay_sec)
         try:
-            os.kill(os.getpid(), signal.SIGINT)
+            os._exit(0)
         except Exception as e:
-            append_log(f"경고: 프로세스 종료 시그널 전송 실패: {type(e).__name__}: {e}")
+            append_log(f"경고: 프로세스 강제 종료 실패: {type(e).__name__}: {e}")
 
     Thread(target=_worker, daemon=True).start()
 
@@ -449,6 +449,8 @@ async def stream_updates(request: Request, limit: int = DEFAULT_LOG_LIMIT):
         next_ping_at = time.time() + 15
         while True:
             if await request.is_disconnected():
+                break
+            if _uvicorn_server is not None and getattr(_uvicorn_server, "should_exit", False):
                 break
 
             payload = None
@@ -823,7 +825,10 @@ def shutdown_system():
     append_log("종료 요청 수신: 서버 graceful shutdown을 시작합니다.")
     if not _request_graceful_server_shutdown():
         append_log("안내: 서버 객체를 찾지 못해 프로세스 SIGINT 종료로 대체합니다.")
-        _signal_process_shutdown_later()
+        _signal_process_shutdown_later(0.5)
+    else:
+        # 안전 장치: graceful 종료가 막히더라도 2초 뒤에 강제 종료
+        _signal_process_shutdown_later(2.0)
     return {"ok": True, "message": "프로그램 종료 요청을 처리했습니다. 잠시 후 서버가 종료됩니다."}
 
 
