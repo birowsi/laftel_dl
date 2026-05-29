@@ -15,7 +15,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse, FileResponse
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import uvicorn
@@ -486,6 +486,13 @@ def index():
     html = html.replace("__ASCII_ART__", engine.ASCII_ART.strip("\n"))
     html = html.replace("__DEFAULT_ANIME_ID__", str(engine.DEFAULT_ANIME_ID))
     return html
+
+@app.get("/image.png", response_class=FileResponse)
+def get_background_image():
+    image_path = Path(__file__).parent / "image.png"
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail="Image not found")
+    return FileResponse(image_path)
 
 
 @app.post("/api/session/ensure")

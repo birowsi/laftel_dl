@@ -104,11 +104,15 @@ def has_authenticated_player_access(driver, anime_id=DEFAULT_ANIME_ID):
         wait = WebDriverWait(driver, 20)
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='/player/']")))
         player_url = None
-        for element in driver.find_elements(By.CSS_SELECTOR, "a[href*='/player/']"):
-            href = element.get_attribute("href")
-            if is_target_player_link(href, anime_id):
-                player_url = href
-                break
+        try:
+            for element in driver.find_elements(By.CSS_SELECTOR, "a[href*='/player/']"):
+                href = element.get_attribute("href")
+                if is_target_player_link(href, anime_id):
+                    player_url = href
+                    break
+        except Exception:
+            # Catch StaleElementReferenceException or others
+            pass
         if not player_url:
             return False
 

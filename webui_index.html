@@ -8,23 +8,23 @@
   <title>laftel downloader</title>
   <style>
     :root {
-      --bg: #f2efe8;
-      --bg-deep: #d9d2c4;
-      --paper: rgba(255, 252, 245, 0.78);
-      --paper-strong: rgba(255, 251, 244, 0.92);
-      --line: rgba(46, 37, 24, 0.14);
-      --text: #1f1a14;
-      --muted: #6f6251;
-      --accent: #126a52;
-      --accent-strong: #0d5a45;
-      --danger: #9d2a24;
-      --console-bg: #161410;
-      --console-text: #ece3d4;
-      --tone-idle: #776857;
-      --tone-ready: #126a52;
-      --tone-active: #1f5da8;
-      --tone-danger: #9d2a24;
-      --shadow: 0 24px 60px rgba(54, 41, 23, 0.12);
+      --bg: #0f0f11;
+      --bg-deep: #0a0a0c;
+      --paper: rgba(22, 22, 26, 0.65);
+      --paper-strong: rgba(28, 28, 34, 0.85);
+      --line: rgba(255, 255, 255, 0.1);
+      --text: #eaeaea;
+      --muted: #9a9a9a;
+      --accent: #d76a7f;
+      --accent-strong: #c24f65;
+      --danger: #d94c4c;
+      --console-bg: #121214;
+      --console-text: #dcdcdc;
+      --tone-idle: #9a9a9a;
+      --tone-ready: #d76a7f;
+      --tone-active: #4a90e2;
+      --tone-danger: #d94c4c;
+      --shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
       --radius-lg: 28px;
       --radius-md: 18px;
       --content-width: 1120px;
@@ -41,10 +41,9 @@
       margin: 0;
       color: var(--text);
       font-family: "SUIT Variable", "Pretendard Variable", "Pretendard", "Noto Sans KR", sans-serif;
-      background:
-        radial-gradient(circle at top left, rgba(18, 106, 82, 0.18), transparent 28%),
-        radial-gradient(circle at top right, rgba(183, 111, 51, 0.14), transparent 32%),
-        linear-gradient(180deg, #fbf8f1 0%, var(--bg) 44%, var(--bg-deep) 100%);
+      background: 
+        linear-gradient(180deg, rgba(15, 15, 17, 0.05) 0%, rgba(10, 10, 12, 0.8) 100%),
+        url('/image.png') top center / 100% auto no-repeat #0a0a0c;
       min-height: 100vh;
     }
 
@@ -77,16 +76,15 @@
       position: relative;
       overflow: hidden;
       display: grid;
-      grid-template-columns: minmax(0, 1.15fr) minmax(340px, 0.85fr);
+      grid-template-columns: minmax(0, 1.15fr) minmax(380px, 0.85fr);
       gap: 32px;
       padding: 44px;
       border: 1px solid var(--line);
       border-radius: var(--radius-lg);
       background:
-        linear-gradient(135deg, rgba(255, 250, 241, 0.96), rgba(246, 238, 227, 0.9)),
-        var(--paper);
+        linear-gradient(135deg, rgba(20, 20, 25, 0.6), rgba(15, 15, 18, 0.4));
       box-shadow: var(--shadow);
-      backdrop-filter: blur(14px);
+      backdrop-filter: blur(8px);
     }
 
     .hero__panel::after {
@@ -127,11 +125,11 @@
 
     .headline {
       margin: 0;
-      max-width: 11ch;
       font-size: clamp(1.35rem, 2vw, 1.9rem);
       line-height: 1.25;
       letter-spacing: -0.03em;
-      color: #312820;
+      color: #f0f0f0;
+      word-break: keep-all;
     }
 
     .support {
@@ -154,7 +152,7 @@
       font-size: clamp(1.35rem, 2.8vw, 2.2rem);
       line-height: 1.2;
       letter-spacing: -0.04em;
-      color: #2d241c;
+      color: #f0f0f0;
       text-wrap: balance;
     }
 
@@ -234,7 +232,7 @@
       padding: 13px 14px;
       font: inherit;
       color: var(--text);
-      background: rgba(255, 255, 255, 0.82);
+      background: rgba(40, 40, 48, 0.8);
       transition: border-color 180ms ease, transform 180ms ease, box-shadow 180ms ease;
     }
 
@@ -256,7 +254,7 @@
     button {
       appearance: none;
       border: 1px solid rgba(46, 37, 24, 0.14);
-      background: rgba(255, 255, 255, 0.86);
+      background: rgba(45, 45, 55, 0.8);
       color: var(--text);
       padding: 12px 16px;
       border-radius: 999px;
@@ -299,7 +297,7 @@
 
     button.warn {
       color: var(--danger);
-      background: rgba(255, 247, 246, 0.92);
+      background: rgba(50, 20, 20, 0.8);
       border-color: rgba(157, 42, 36, 0.22);
     }
 
@@ -363,8 +361,9 @@
       padding: 28px;
       border-radius: var(--radius-md);
       border: 1px solid var(--line);
-      background: var(--paper-strong);
-      box-shadow: 0 18px 40px rgba(57, 44, 25, 0.07);
+      background: rgba(22, 22, 26, 0.55);
+      backdrop-filter: blur(12px);
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.3);
       transform: translateY(18px);
       opacity: 0;
       animation: riseIn 720ms ease forwards;
@@ -428,7 +427,7 @@
     .summary-item {
       padding: 14px 16px;
       border-radius: 16px;
-      background: rgba(255, 255, 255, 0.6);
+      background: rgba(35, 35, 45, 0.6);
       border: 1px solid rgba(46, 37, 24, 0.08);
     }
 
@@ -446,7 +445,7 @@
       font-size: 1rem;
       line-height: 1.45;
       letter-spacing: -0.02em;
-      color: #2f261e;
+      color: #f0f0f0;
       word-break: break-word;
     }
 
@@ -473,7 +472,7 @@
       height: 12px;
       overflow: hidden;
       border-radius: 999px;
-      background: rgba(46, 37, 24, 0.1);
+      background: rgba(255, 255, 255, 0.1);
     }
 
     .progress-bar > span {
@@ -481,16 +480,61 @@
       height: 100%;
       width: 0%;
       border-radius: inherit;
-      background: linear-gradient(90deg, #126a52 0%, #d6863f 100%);
+      background: linear-gradient(90deg, #c24f65 0%, #d76a7f 50%, #f0a3b2 100%);
+      background-size: 200% 100%;
+      animation: progressGradient 2s linear infinite;
       transition: width 280ms ease;
     }
+    
+    @keyframes progressGradient {
+      0% { background-position: 100% 0; }
+      100% { background-position: -100% 0; }
+    }
+    
+    /* Toast CSS */
+    .toast-container {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      z-index: 10000;
+      pointer-events: none;
+    }
+    .toast {
+      padding: 14px 20px;
+      background: rgba(30, 30, 35, 0.95);
+      backdrop-filter: blur(10px);
+      border-left: 4px solid var(--accent);
+      border-radius: 8px;
+      color: #fff;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+      font-size: 0.95rem;
+      transform: translateX(120%);
+      opacity: 0;
+      transition: all 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+    }
+    .toast.show {
+      transform: translateX(0);
+      opacity: 1;
+    }
+    .toast.success { border-left-color: var(--accent); }
+    .toast.error { border-left-color: var(--danger); }
+    .toast.info { border-left-color: var(--tone-active); }
+    
+    /* Log Colors */
+    .log-info { color: #5bc0de; }
+    .log-error { color: #d9534f; font-weight: bold; }
+    .log-warn { color: #f0ad4e; }
+    
 
     .guide-list {
       margin: 0;
       padding-left: 20px;
       display: grid;
       gap: 10px;
-      color: #3f352a;
+      color: #dcdcdc;
       line-height: 1.7;
     }
 
@@ -526,7 +570,7 @@
       border-radius: 18px;
       padding: 20px;
       background:
-        linear-gradient(135deg, rgba(255, 250, 241, 0.98), rgba(246, 238, 227, 0.94)),
+        linear-gradient(135deg, rgba(35, 35, 42, 0.9), rgba(25, 25, 30, 0.9)),
         var(--paper-strong);
       box-shadow: var(--shadow);
       transform: translateY(8px) scale(0.985);
@@ -779,6 +823,25 @@
   </div>
 
   <script>
+
+    
+    function showToast(message, type = 'info') {
+      const container = document.getElementById('toastContainer');
+      const toast = document.createElement('div');
+      toast.className = `toast ${type}`;
+      toast.textContent = message;
+      container.appendChild(toast);
+      
+      // Trigger reflow
+      void toast.offsetWidth;
+      toast.classList.add('show');
+      
+      setTimeout(() => {
+        toast.classList.remove('show');
+        setTimeout(() => toast.remove(), 300);
+      }, 3000);
+    }
+
     const out = document.getElementById("out");
     const logSection = document.getElementById("logSection");
     const liveStream = document.getElementById("liveStream");
@@ -1399,5 +1462,6 @@
     }
     refreshArchiveTargets();
   </script>
+  <div id="toastContainer" class="toast-container"></div>
 </body>
 </html>

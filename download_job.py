@@ -181,30 +181,37 @@ class DownloadJob:
         return None
 
     def _collect_player_entries_with_wait(self, selectors, timeout=20, min_count=1):
+        from selenium.common.exceptions import StaleElementReferenceException
         deadline = time.time() + timeout
         found = []
         while time.time() < deadline:
             entries = []
-            for selector in selectors:
-                for element in self.driver.find_elements(By.CSS_SELECTOR, selector):
-                    href = element.get_attribute("href")
-                    if not is_target_player_link(href, self.anime_id):
-                        continue
-                    label = (
-                        element.text
-                        or element.get_attribute("title")
-                        or element.get_attribute("aria-label")
-                        or ""
-                    ).strip()
-                    if href not in [item.href for item in entries]:
-                        entries.append(
-                            EpisodeEntry(
-                                href=href,
-                                label=label,
-                                episode_num=self._extract_episode_number_from_text(label),
-                                order_num=len(entries) + 1,
+            try:
+                for selector in selectors:
+                    for element in self.driver.find_elements(By.CSS_SELECTOR, selector):
+                        href = element.get_attribute("href")
+                        if not is_target_player_link(href, self.anime_id):
+                            continue
+                        label = (
+                            element.text
+                            or element.get_attribute("title")
+                            or element.get_attribute("aria-label")
+                            or ""
+                        ).strip()
+                        if href not in [item.href for item in entries]:
+                            entries.append(
+                                EpisodeEntry(
+                                    href=href,
+                                    label=label,
+                                    episode_num=self._extract_episode_number_from_text(label),
+                                    order_num=len(entries) + 1,
+                                )
                             )
-                        )
+            except StaleElementReferenceException:
+                # DOM was modified while iterating, wait for next poll
+                time.sleep(self.LINK_POLL_INTERVAL_SEC)
+                continue
+                
             if len(entries) >= min_count:
                 return entries
             found = entries

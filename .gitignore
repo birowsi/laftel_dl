@@ -20,3 +20,8 @@ Thumbs.db
 .DS_Store
 *.log
 *.tmp
+
+# Temp & Patch Scripts
+scratch*.py
+patch_*.py
+*_test.html
