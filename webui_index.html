@@ -1,5 +1,19 @@
-<!-- FILE: webui_index.html -->
-<!-- AI_NOTE: Web frontend page. Presents a brand-forward single-user control surface for session/login, download control, live logs, and WebUI-only split archive actions. -->
+<!--
+=========================================================
+ Laftel Downloader Web Frontend
+=========================================================
+
+This is the primary user interface for the application. It is a single-page
+application (SPA) built with Vanilla HTML/CSS/JS to keep dependencies minimal.
+
+Key Features:
+- Modern, dark-themed "Glassmorphism" UI design with responsive background.
+- Real-time logging and progress tracking via Server-Sent Events (SSE).
+- Custom Toast notifications for alerts.
+- Fully asynchronous API calls to control sessions, downloads, and archiving.
+- Client-side log coloring and parsing.
+=========================================================
+-->
 <!doctype html>
 <html lang="ko">
 <head>
@@ -43,7 +57,7 @@
       font-family: "SUIT Variable", "Pretendard Variable", "Pretendard", "Noto Sans KR", sans-serif;
       background: 
         linear-gradient(180deg, rgba(15, 15, 17, 0.05) 0%, rgba(10, 10, 12, 0.8) 100%),
-        url('/image.png') top center / 100% auto no-repeat #0a0a0c;
+        url('/background.png') top center / 100% auto no-repeat #0a0a0c;
       min-height: 100vh;
     }
 

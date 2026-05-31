@@ -1,5 +1,15 @@
-# FILE: engine.py
-# AI_NOTE: Compatibility facade. Re-exports session/runtime APIs and runs DownloadJob with optional event hook and episode-range support.
+"""
+High-Level Facade Engine
+========================
+
+This module serves as the primary gateway for both the CLI (`main.py`) and the WebUI (`webui_server.py`).
+It abstracts away the complexities of the underlying modules.
+
+Key Responsibilities:
+1. Re-exporting critical session and runtime APIs.
+2. Initializing the `DownloadJob` and injecting any required event hooks.
+3. Handling high-level error capture and cleanup logic for downloaded artifacts.
+"""
 from browser_session import (
     create_webdriver_with_profile,
     ensure_logged_in,

@@ -1,5 +1,16 @@
-# FILE: webui_state.py
-# AI_NOTE: WebUI runtime state module. Owns single-user in-memory state, log buffering, session phase tracking, UI-friendly status derivation, and the log handler that bridges engine logs into WebUI logs.
+"""
+WebUI Runtime State Module
+==========================
+
+This module maintains the global, thread-safe state of the WebUI server.
+
+Key Responsibilities:
+1. Storing the single-user, in-memory state of the application (current anime, progress, active workers).
+2. Buffering the most recent logs to serve to new frontend connections.
+3. Providing a custom logging handler (`WebUILogHandler`) that intercepts logs from the `engine`
+   and routes them directly into the WebUI's SSE stream.
+4. Formatting the internal state into a UI-friendly dictionary payload for the frontend.
+"""
 from datetime import datetime
 import logging
 from threading import Lock, Thread

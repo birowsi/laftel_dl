@@ -1,5 +1,14 @@
-# FILE: smoke_test.py
-# AI_NOTE: Lightweight local smoke test for module wiring. Does not open browser or perform network/download actions.
+"""
+Local Smoke Test Script
+=======================
+
+A lightweight sanity check script to verify that all modules load correctly and the dependencies
+are wired up as expected.
+
+It performs basic introspection on `engine.py`, `runtime_support.py`, and `drm_support.py`
+without actually opening a browser, sending network requests, or starting a download.
+Useful for quick validation after refactoring code.
+"""
 import inspect
 
 import browser_session

@@ -1,5 +1,15 @@
-# FILE: main.py
-# AI_NOTE: CLI entrypoint. Parses args (anime id / optional episode ranges) and delegates work to engine.py.
+"""
+Command Line Interface (CLI) Entrypoint
+=======================================
+
+This script provides a terminal-based interface to the Laftel Downloader.
+It parses user arguments such as the target anime ID and the optional episode range filter,
+then delegates the actual downloading work to `engine.py`.
+
+Usage:
+    python main.py --anime-id 16074
+    python main.py --anime-id 16074 --episodes "1-3,5"
+"""
 import argparse
 
 import engine

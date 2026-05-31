@@ -1,5 +1,18 @@
-# FILE: browser_session.py
-# AI_NOTE: Browser/session module. Owns webdriver creation, session verification, and login flow transitions (including optional off-screen visible mode).
+"""
+Browser Session Management Module
+=================================
+
+This module is responsible for managing the entire lifecycle of the Chrome webdriver session.
+It handles:
+1. WebDriver initialization with appropriate anti-detection arguments (undetected_chromedriver).
+2. Existing session verification via saved `.chrome-profile`.
+3. Login flow transitions, including gracefully opening a visible browser window when
+   authentication or CAPTCHA resolution is required.
+4. Securely tearing down sessions without leaving zombie processes.
+
+Note: This module acts as the lowest-level interface to the browser, and its methods
+are heavily utilized by `engine.py` and `download_job.py`.
+"""
 import re
 import time
 from pathlib import Path

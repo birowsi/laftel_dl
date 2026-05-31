@@ -1,5 +1,16 @@
-# FILE: drm_support.py
-# AI_NOTE: DRM helper module. Extracts PSSH and obtains Widevine decryption keys from license requests.
+"""
+DRM Extraction & Support Module
+===============================
+
+This module provides the necessary cryptographic logic to bypass Widevine DRM.
+It heavily relies on the `pywidevine` library and the provided `device.wvd` L3 CDM key.
+
+Key Responsibilities:
+1. Parsing the PSSH (Protection System Specific Header) from the MPD manifest.
+2. Generating a Widevine license challenge using the local CDM device key.
+3. Sending the challenge to the extracted license URL with the captured authentication headers.
+4. Parsing the returned license response and extracting the raw decryption keys (KID:KEY pairs).
+"""
 import base64
 import os
 import subprocess

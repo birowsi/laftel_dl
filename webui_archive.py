@@ -1,5 +1,16 @@
-# FILE: webui_archive.py
-# AI_NOTE: WebUI archive module. Finds 7z executables, validates download targets, runs 500MB split archive jobs, and reports progress/errors through injected callbacks.
+"""
+WebUI Archive (Split Compression) Module
+========================================
+
+This module provides the logic for the "Split Archive" feature available in the WebUI.
+It allows users to compress downloaded anime folders into 500MB chunks using the `7z` format.
+
+Key Responsibilities:
+1. Detecting and validating the presence of `7z.exe` or `7za.exe` binaries.
+2. Managing the asynchronous subprocess that runs the 7-Zip CLI.
+3. Parsing the stdout/stderr of 7-Zip to extract real-time compression progress (-bsp1).
+4. Emitting progress and completion events back to the WebUI via callbacks.
+"""
 import locale
 import shutil
 import subprocess

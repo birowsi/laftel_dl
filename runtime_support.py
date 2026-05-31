@@ -1,5 +1,16 @@
-# FILE: runtime_support.py
-# AI_NOTE: Shared runtime utilities (logging, process/env helpers, cleanup, tool checks, constants).
+"""
+Shared Runtime Utilities Module
+===============================
+
+This module provides common utilities and configuration used across the entire application.
+
+Key Responsibilities:
+1. Defining and managing application-wide constants and directory paths (`downloads`, `archives`, `.chrome-profile`).
+2. Setting up the base logging system (`setup_logging`, `append_log`) that outputs to the console and log files.
+3. Providing cleanup utilities for dangling Chrome processes or temporary download artifacts.
+4. Implementing the `check_tools` function to ensure all required external binaries
+   (`N_m3u8DL-RE`, `mp4decrypt`, `mkvmerge`, etc.) exist before the application starts.
+"""
 import json
 import logging
 import os

@@ -1,5 +1,20 @@
-# FILE: download_job.py
-# AI_NOTE: Download executor class with optional event hooks and episode-range filtering. Resolves episodes, captures DRM/network data, auto-recovers broken webdriver sessions, and runs retry logic on offscreen-visible browser sessions.
+"""
+Download Execution Module
+=========================
+
+This is the core engine that actually performs the scraping, DRM extraction, and video downloading.
+It manages the entire lifecycle of a single or multi-episode download request.
+
+Key Responsibilities:
+1. Resolving the anime ID into a list of specific episode URLs (and applying episode range filters).
+2. Setting up the Chrome DevTools Protocol (CDP) listener to capture network requests,
+   specifically the Widevine license request and the MPD manifest request.
+3. Automatically recovering from broken webdriver sessions (e.g., StaleElementReferenceExceptions)
+   by retrying the URL navigation.
+4. Calling external DRM helper modules to extract keys and triggering external binaries
+   (`N_m3u8DL-RE`, `mp4decrypt`, `mkvmerge`) to download and decrypt the streams.
+5. Emitting real-time progress events to the WebUI via the injected `event_hook`.
+"""
 import os
 import re
 import subprocess

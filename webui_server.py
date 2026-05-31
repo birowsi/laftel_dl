@@ -1,5 +1,17 @@
-# FILE: webui_server.py
-# AI_NOTE: FastAPI backend for WebUI. Manages session APIs, download job lifecycle, SSE status/log streaming, and WebUI-only 500MB split-archive jobs for downloaded folders.
+"""
+FastAPI WebUI Server Module
+===========================
+
+This is the main backend application for the Laftel Downloader Web User Interface.
+It provides a REST API and Server-Sent Events (SSE) stream for the frontend.
+
+Key Responsibilities:
+1. Serving the main HTML interface (`webui_index.html`) and static assets.
+2. Managing the lifecycle of the download job and browser session via API endpoints (`/api/session/*`, `/api/download/*`).
+3. Handling multi-anime download parsing and sequential execution.
+4. Broadcasting real-time logs and state updates to the frontend via SSE (`/api/stream`).
+5. Exposing the split archive feature via API endpoints (`/api/archive/*`).
+"""
 import asyncio
 import json
 import warnings
@@ -489,11 +501,11 @@ def index():
     html = html.replace("__DEFAULT_ANIME_ID__", str(engine.DEFAULT_ANIME_ID))
     return html
 
-@app.get("/image.png")
+@app.get("/background.png")
 def get_background_image():
     from fastapi import Response
     import base64
-    image_path = Path(__file__).parent / "image.png"
+    image_path = Path(__file__).parent / "background.png"
     if image_path.exists():
         return FileResponse(image_path)
     # Transparent 1x1 PNG fallback
