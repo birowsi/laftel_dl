@@ -489,12 +489,16 @@ def index():
     html = html.replace("__DEFAULT_ANIME_ID__", str(engine.DEFAULT_ANIME_ID))
     return html
 
-@app.get("/image.png", response_class=FileResponse)
+@app.get("/image.png")
 def get_background_image():
+    from fastapi import Response
+    import base64
     image_path = Path(__file__).parent / "image.png"
-    if not image_path.exists():
-        raise HTTPException(status_code=404, detail="Image not found")
-    return FileResponse(image_path)
+    if image_path.exists():
+        return FileResponse(image_path)
+    # Transparent 1x1 PNG fallback
+    transparent_png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+    return Response(content=base64.b64decode(transparent_png_base64), media_type="image/png")
 
 
 @app.post("/api/session/ensure")

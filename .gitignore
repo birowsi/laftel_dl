@@ -25,3 +25,6 @@ Thumbs.db
 scratch*.py
 patch_*.py
 *_test.html
+
+# Local Backgrounds
+image.png
