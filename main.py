@@ -20,8 +20,8 @@ def parse_args():
     parser.add_argument(
         "--anime-id",
         type=int,
-        default=engine.DEFAULT_ANIME_ID,
-        help=f"다운로드할 작품 ID (기본값: {engine.DEFAULT_ANIME_ID})",
+        default=None,
+        help="다운로드할 작품 ID (입력하지 않으면 실행 후 프롬프트에서 입력)",
     )
     parser.add_argument(
         "--episodes",
@@ -32,7 +32,14 @@ def parse_args():
     return parser.parse_args()
 
 
-def run_cli(anime_id: int, episodes: str | None = None) -> int:
+def run_cli(anime_id: int | None, episodes: str | None = None) -> int:
+    if anime_id is None:
+        try:
+            val = input("다운로드할 라프텔 작품 ID를 입력하세요: ").strip()
+            anime_id = int(val) if val else engine.DEFAULT_ANIME_ID
+        except ValueError:
+            print("오류: 올바른 숫자 ID를 입력해야 합니다.")
+            return 1
     print(engine.ASCII_ART)
     print(f"대상 작품 ID: {anime_id}")
     print("초기 점검을 시작합니다...")
