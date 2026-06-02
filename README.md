@@ -1,6 +1,11 @@
 # Laftel DL
+![Version](https://img.shields.io/badge/version-v1.3.1-blue.svg)
+![Python](https://img.shields.io/badge/python-3.13-blue.svg)
+![Platform](https://img.shields.io/badge/platform-Windows-0078D6.svg)
+![WebUI](https://img.shields.io/badge/WebUI-FastAPI-009688.svg)
+![License](https://img.shields.io/badge/license-MIT-green.svg)
 
-라프텔 스트리밍 다운로더. WebUI와 CLI 환경을 지원합니다.
+다운로더입니다. WebUI와 CLI 환경을 지원합니다.
 
 ## Requirements
 
