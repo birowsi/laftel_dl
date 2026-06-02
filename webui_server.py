@@ -849,6 +849,7 @@ def shutdown_system():
 
 
 if __name__ == "__main__":
+    print(engine.ASCII_ART)
     config = uvicorn.Config(app=app, host="127.0.0.1", port=8000, reload=False)
     _uvicorn_server = uvicorn.Server(config)
     _auto_open_webui_browser()
