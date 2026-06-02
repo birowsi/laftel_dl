@@ -2,7 +2,7 @@
 
 ![Version](https://img.shields.io/badge/version-v1.3.1-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.13-blue.svg)
-![License](https://img.shields.io/badge/license-Private-red.svg)
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
 라프텔(Laftel) 작품 ID를 기준으로 회차를 수집하고, DRM 네트워크 흐름을 캡처하여 스트리밍 영상을 다운로드하는 자동화 도구입니다.
 
