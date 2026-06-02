@@ -33,6 +33,7 @@ def parse_args():
 
 
 def run_cli(anime_id: int, episodes: str | None = None) -> int:
+    print(engine.ASCII_ART)
     print(f"대상 작품 ID: {anime_id}")
     print("초기 점검을 시작합니다...")
 

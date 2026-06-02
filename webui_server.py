@@ -497,6 +497,7 @@ async def stream_updates(request: Request, limit: int = DEFAULT_LOG_LIMIT):
 @app.get("/", response_class=HTMLResponse)
 def index():
     html = HTML_TEMPLATE_PATH.read_text(encoding="utf-8")
+    html = html.replace("__ASCII_ART__", engine.ASCII_ART.strip("\n"))
     html = html.replace("__DEFAULT_ANIME_ID__", str(engine.DEFAULT_ANIME_ID))
     return html
 
