@@ -53,7 +53,7 @@ def log_print(*args, **kwargs):
 setup_logging()
 
 
-WVD_PATH = "./license/device.wvd"
+WVD_PATH = "./binaries/device.wvd"
 BINARY_DIR = Path("./binaries").resolve()
 N_M3U8DL_RE_EXE = BINARY_DIR / "N_m3u8DL-RE.exe"
 MKVMERGE_EXE = BINARY_DIR / "mkvmerge.exe"
@@ -193,7 +193,6 @@ def cleanup_stale_root_episode_dirs():
         "__pycache__",
         "downloads",
         "archives",
-        "license",
         "binaries",
     }
     temp_exts = {

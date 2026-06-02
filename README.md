@@ -12,7 +12,7 @@
 - Windows 10/11
 - Python 3.13
 - Google Chrome
-- `license/device.wvd` (본인의 Widevine L3 CDM 키 필요)
+- `binaries/device.wvd` (본인의 Widevine L3 CDM 키 필요)
 - `binaries/` 폴더 내 필수 바이너리:
   - `N_m3u8DL-RE.exe`
   - `mkvmerge.exe`

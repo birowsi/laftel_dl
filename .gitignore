@@ -6,7 +6,7 @@ __pycache__/
 *.pyc
 /.runtime
 /.env
-/license
+binaries/device.wvd
 /.pytest_cache
 /.mypy_cache
 /.ruff_cache
